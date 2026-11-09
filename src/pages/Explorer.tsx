@@ -67,7 +67,7 @@ export default function Explorer() {
   return (
     <main className="mt-5 flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-        <QuestionCard value={input} onChange={setInput} onRun={run} loading={loading} />
+        <QuestionCard value={input} onChange={setInput} onRun={run} loading={loading} activeQuery={result ? query : ""} />
         <ModeCard technique={technique} onTechnique={setTechnique} topK={topK} onTopK={setTopK} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:h-[700px] lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   forceCollide, forceLink, forceManyBody, forceSimulation, forceX, forceY,
   type Simulation, type SimulationLinkDatum, type SimulationNodeDatum,
@@ -6,7 +6,7 @@ import {
 import { select } from "d3-selection";
 import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zoom";
 import "d3-transition";
-import { Maximize2, Shrink, X } from "lucide-react";
+import { Crosshair, Maximize2, Shrink, Tag, X } from "lucide-react";
 import clsx from "clsx";
 import type { GraphEdge, GraphNode } from "@/lib/api";
 import { clusterColor, type Signals } from "@/lib/signals";
@@ -256,16 +256,21 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
   const visibleLinks = simLinksRef.current;
 
   return (
-    <section className="card flex h-full min-h-0 flex-col gap-3 p-0">
-      <div className="flex flex-wrap items-center gap-2 px-4 pt-3">
-        <h2 className="font-title text-sm font-semibold">Knowledge graph</h2>
-        <span className="font-mono text-[11px] text-muted">{graph.nodes.length} nodes · {graph.edges.length} edges</span>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          <NodeSearch nodes={graph.nodes} focusId={focusId} onFocus={focusNode} />
-          <Toggle on={follow} onClick={() => setFollow((f) => !f)} label="follow" />
-          <Toggle on={allLabels} onClick={() => setAllLabels((f) => !f)} label="all labels" />
-          <button className="btn" onClick={() => fitVisible()}><Maximize2 size={12} />Fit</button>
-          {detail && <button className="btn" onClick={collapseAll}><Shrink size={12} />Collapse all</button>}
+    <section className="card flex h-full min-h-0 flex-col p-0">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
+        <div className="mr-auto flex items-baseline gap-2">
+          <h2 className="font-title text-sm font-semibold">Knowledge graph</h2>
+          <span className="font-mono text-[11px] text-muted">{graph.nodes.length} nodes · {graph.edges.length} edges</span>
+        </div>
+        <NodeSearch nodes={graph.nodes} focusId={focusId} onFocus={focusNode} />
+        <div className="flex items-center rounded-md border border-line bg-bg p-0.5">
+          <ToolToggle on={follow} onClick={() => setFollow((f) => !f)} icon={<Crosshair size={13} />} label="follow"
+            title="Follow: auto-zoom to each new result" />
+          <ToolToggle on={allLabels} onClick={() => setAllLabels((f) => !f)} icon={<Tag size={13} />} label="labels"
+            title="Show every node label" />
+          <span className="mx-0.5 h-4 w-px bg-line" />
+          <ToolButton onClick={() => fitVisible()} title="Fit to view"><Maximize2 size={13} /></ToolButton>
+          <ToolButton onClick={collapseAll} disabled={!detail} title="Collapse all regions"><Shrink size={13} /></ToolButton>
         </div>
       </div>
 
@@ -276,10 +281,10 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
             <ClusterRegions orbs={orbs} expanded={expanded} detail={detail} hovered={hoveredOrb} onHover={setHoveredOrb}
               onExpand={(c) => { setExpanded((prev) => new Set([...prev, c])); setHoveredOrb(null); }} />
 
-            {/* faint region titles for expanded clusters */}
-            {orbs.filter((o) => expanded.has(o.cluster)).map((o) => (
-              <text key={o.cluster} x={o.x} y={o.y - o.r - 18} textAnchor="middle" style={{ fontSize: 10 / transform.k }}
-                className="pointer-events-none select-none fill-muted font-mono uppercase tracking-widest" opacity={0.35}>
+            {/* faint region titles while browsing; hidden once something is emphasised so they never sit on top of results */}
+            {!emphasis && orbs.filter((o) => expanded.has(o.cluster)).map((o) => (
+              <text key={o.cluster} x={o.x} y={o.y - o.r - 22} textAnchor="middle" style={{ fontSize: 10 / transform.k }}
+                className="pointer-events-none select-none fill-muted font-mono uppercase tracking-widest" opacity={0.4}>
                 {o.cluster}
               </text>
             ))}
@@ -292,7 +297,7 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
                 const rel = signals?.relation.has(l.id);
                 return (
                   <line key={l.id} x1={s.x} y1={s.y} x2={t.x} y2={t.y}
-                    stroke={rel ? "var(--global)" : "#3a4a5e"} strokeWidth={rel ? 1.3 : 1}
+                    stroke={rel ? "var(--global)" : "#3a4a5e"} strokeWidth={(rel ? 1.3 : 1) / Math.max(1, transform.k)}
                     opacity={emphasis ? (emph ? 0.9 : 0.08) : 0.6} style={{ transition: "opacity 300ms" }} />
                 );
               })}
@@ -310,7 +315,7 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
                     )}
                     <circle r={n.r} fill={nodeFill(n)} stroke="var(--bg)" strokeWidth={1.5} />
                     {showLabel(n) && (
-                      <text y={n.r + 4 + 10 / transform.k} textAnchor="middle" className="pointer-events-none select-none fill-ink font-mono"
+                      <text y={n.r + 4 + 10 / transform.k} textAnchor="middle" className="select-none fill-ink font-mono"
                         style={{ fontSize: 10.5 / transform.k, paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 / transform.k }}>
                         {n.label}
                       </text>
@@ -322,38 +327,61 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
           </g>
         </svg>
 
-        {!detail && (
-          <p className="pointer-events-none absolute left-4 top-3 font-mono text-[11px] text-muted">click a region to expand it</p>
-        )}
         {highlight && (
           <div className="absolute left-3 top-3 flex items-center gap-2 rounded-md border border-line bg-surface/95 px-2.5 py-1 text-xs">
-            <span className="text-muted">highlighting</span><span className="max-w-[260px] truncate">{highlight.label}</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-ink" />
+            <span className="max-w-[260px] truncate">{highlight.label}</span>
             <button onClick={onClearHighlight} className="text-muted hover:text-ink" aria-label="Clear highlight"><X size={12} /></button>
           </div>
         )}
         {selected && (
-          <NodeInspector node={selected} degree={degree.get(selected.id) ?? 0} signals={signals} onClose={() => onSelect(null)} />
+          <NodeInspector
+            node={selected}
+            degree={degree.get(selected.id) ?? 0}
+            signals={signals}
+            neighbours={[...(neighbours.get(selected.id) ?? [])].map((id) => nodeBy.get(id)).filter((n): n is GraphNode => !!n)}
+            onPick={focusNode}
+            onClose={() => onSelect(null)}
+          />
         )}
-        <Legend />
+
+        <div className="pointer-events-none absolute inset-x-3 bottom-3 flex flex-wrap items-end justify-between gap-2">
+          <Legend signals={!!signals} clusters={orbs.map((o) => o.cluster)} />
+          <span className="font-mono text-[10px] text-muted/70">
+            {detail ? "scroll to zoom · drag to pan · click a node" : "click a region to expand it"}
+          </span>
+        </div>
       </div>
     </section>
   );
 }
 
-function Toggle({ on, onClick, label }: { on: boolean; onClick: () => void; label: string }) {
+function ToolToggle({ on, onClick, icon, label, title }: { on: boolean; onClick: () => void; icon: ReactNode; label: string; title: string }) {
   return (
-    <button onClick={onClick} aria-pressed={on} className={clsx("btn font-mono", on && "border-local/60 text-local")}>
-      <span className={clsx("h-1.5 w-1.5 rounded-full", on ? "bg-local" : "bg-line")} />{label}
+    <button onClick={onClick} aria-pressed={on} title={title}
+      className={clsx("flex items-center gap-1.5 rounded px-2 py-1 font-mono text-[11px] transition-colors",
+        on ? "bg-surface-2 text-local" : "text-muted hover:text-ink")}>
+      {icon}{label}
     </button>
   );
 }
 
-function Legend() {
-  const items: [string, string, boolean?][] = [
-    ["entity", "var(--local)"], ["relation", "var(--global)", true], ["vector", "var(--vector)"], ["in final context", "#f4f7fa"],
-  ];
+function ToolButton({ onClick, disabled, title, children }: { onClick: () => void; disabled?: boolean; title: string; children: ReactNode }) {
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-line bg-surface/90 px-2.5 py-1.5 font-mono text-[10px] text-muted">
+    <button onClick={onClick} disabled={disabled} title={title} aria-label={title}
+      className="rounded p-1.5 text-muted transition-colors hover:text-ink disabled:pointer-events-none disabled:opacity-30">
+      {children}
+    </button>
+  );
+}
+
+/** Before a query nodes are coloured by cluster; after one, by retrieval signal. */
+function Legend({ signals, clusters }: { signals: boolean; clusters: string[] }) {
+  const items: [string, string, boolean?][] = signals
+    ? [["entity", "var(--local)"], ["relation", "var(--global)", true], ["vector", "var(--vector)"], ["in final context", "#f4f7fa"]]
+    : clusters.map((c): [string, string] => [c, clusterColor(c)]);
+  return (
+    <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-line bg-surface/90 px-2.5 py-1.5 font-mono text-[10px] text-muted">
       {items.map(([label, color, line]) => (
         <span key={label} className="flex items-center gap-1.5">
           {line ? <span className="h-[2px] w-3 rounded" style={{ background: color }} /> : <span className="h-2 w-2 rounded-full" style={{ background: color }} />}

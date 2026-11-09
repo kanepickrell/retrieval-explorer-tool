@@ -23,7 +23,7 @@ export default function ProspectorTable({ datasets, activeId, onSelect }: Props)
             const active = d.id === activeId;
             return (
               <tr key={d.id} onClick={() => onSelect(d.id)} aria-selected={active}
-                className={clsx("cursor-pointer border-t border-line transition-colors", active ? "bg-surface-2" : "hover:bg-surface-2/50")}>
+                className={clsx("cursor-pointer border-t border-line transition-colors", active ? "bg-surface-2 shadow-[inset_2px_0_0_var(--local)]" : "hover:bg-surface-2/50")}>
                 <td className="px-3 py-2.5">
                   <span className="flex items-center gap-2">
                     <span className={clsx("h-1.5 w-1.5 rounded-full", active ? "bg-local" : "bg-transparent")} />

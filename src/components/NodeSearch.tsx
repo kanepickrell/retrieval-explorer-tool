@@ -25,7 +25,7 @@ export default function NodeSearch({ nodes, focusId, onFocus }: Props) {
   const clear = () => { onFocus(null); setQ(""); };
 
   return (
-    <div className="relative w-56">
+    <div className="relative w-48">
       <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
       <input
         className="input py-1.5 pl-7 pr-7 text-xs"

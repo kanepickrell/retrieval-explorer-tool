@@ -1,43 +1,38 @@
-import { Link } from "react-router-dom";
 import { Loader2, Search } from "lucide-react";
+import clsx from "clsx";
 import { SAMPLE_QUERIES } from "@/lib/api";
-import { useExplorer } from "@/lib/explorer-context";
 
 type Props = {
   value: string;
   onChange: (v: string) => void;
   onRun: (q: string) => void;
   loading: boolean;
+  /** the query that produced the current result, to mark its chip */
+  activeQuery: string;
 };
 
-export default function QuestionCard({ value, onChange, onRun, loading }: Props) {
-  const { dataset } = useExplorer();
+export default function QuestionCard({ value, onChange, onRun, loading, activeQuery }: Props) {
   return (
     <section className="card flex flex-col gap-3">
-      <div className="flex items-baseline justify-between gap-2">
-        <h2 className="caption">Question</h2>
-        <span className="font-mono text-[11px] text-muted">
-          querying <span className="text-ink">{dataset?.name ?? "…"}</span> ·{" "}
-          <Link to="/prospector" className="underline decoration-line underline-offset-2 hover:text-ink">change</Link>
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-1.5">
+      <h2 className="caption">Question</h2>
+      <form className="relative" onSubmit={(e) => { e.preventDefault(); if (value.trim()) onRun(value.trim()); }}>
+        <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
+        <input className="input h-11 pl-9 pr-28 text-[15px]" placeholder="Ask anything about the documents"
+          value={value} onChange={(e) => onChange(e.target.value)} aria-label="Question" />
+        <button type="submit" className="btn-primary absolute right-1.5 top-1/2 h-8 -translate-y-1/2 px-3" disabled={loading || !value.trim()}>
+          {loading ? <Loader2 size={14} className="animate-spin" /> : null} Search
+        </button>
+      </form>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-0.5 font-mono text-[11px] text-muted/70">try</span>
         {SAMPLE_QUERIES.map((q) => (
-          <button
-            key={q}
-            onClick={() => { onChange(q); onRun(q); }}
-            className="rounded-full border border-line bg-surface-2 px-2.5 py-1 text-left text-xs text-muted transition-colors hover:border-local/60 hover:text-ink"
-          >
+          <button key={q} onClick={() => { onChange(q); onRun(q); }}
+            className={clsx("rounded-full border px-2.5 py-0.5 text-left text-xs transition-colors",
+              q === activeQuery ? "border-local/60 bg-local/10 text-ink" : "border-line bg-surface-2 text-muted hover:border-muted/50 hover:text-ink")}>
             {q}
           </button>
         ))}
       </div>
-      <form className="flex gap-2" onSubmit={(e) => { e.preventDefault(); if (value.trim()) onRun(value.trim()); }}>
-        <input className="input" placeholder="Ask anything about the documents" value={value} onChange={(e) => onChange(e.target.value)} />
-        <button type="submit" className="btn-primary shrink-0" disabled={loading || !value.trim()}>
-          {loading ? <Loader2 size={15} className="animate-spin" /> : <Search size={15} />} Search
-        </button>
-      </form>
     </section>
   );
 }
