@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #0c1219;
+  --surface: #131b25;
+  --surface-2: #1b232a;
+  --line: #283444;
+  --ink: #e3e8ee;
+  --muted: #93a0b0;
+  --local: #35c0be;
+  --global: #e0a73a;
+  --vector: #a58ff1;
+  --good: #5cc27a;
+  --warn: #e0b341;
+  --bad: #e8736b;
+  color-scheme: dark;
+}
+
+html, body, #root { min-height: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer components {
+  .card { @apply bg-surface border border-line rounded-card p-4; }
+  .caption { @apply font-mono text-[11px] uppercase tracking-[0.08em] text-muted; }
+  .btn { @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs text-ink hover:border-muted/60 transition-colors disabled:opacity-40; }
+  .btn-primary { @apply inline-flex items-center gap-1.5 rounded-md bg-local px-4 py-2 text-sm font-medium text-bg hover:brightness-110 transition disabled:opacity-50; }
+  .input { @apply w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted/70 outline-none focus:border-local/70; }
+  .tabular { font-variant-numeric: tabular-nums; }
+}
+
+.answer-md p { margin: 0 0 0.7em; line-height: 1.6; }
+.answer-md ul { margin: 0 0 0.7em; padding-left: 1.2em; list-style: disc; }
+.answer-md li { margin: 0.2em 0; }
+.answer-md strong { color: var(--ink); font-weight: 600; }
+.answer-md code { font-family: "JetBrains Mono", monospace; font-size: 0.85em; background: var(--surface-2); padding: 0 4px; border-radius: 4px; }
+
+.caret::after { content: "▍"; color: var(--local); animation: blink 1s steps(1) infinite; margin-left: 1px; }
+@keyframes blink { 50% { opacity: 0; } }
+
+.orb-drift { animation: orb-drift 9s ease-in-out infinite alternate; }
+@keyframes orb-drift {
+  0%   { transform: translate(0px, 0px); }
+  50%  { transform: translate(5px, -4px); }
+  100% { transform: translate(-4px, 4px); }
+}
+@media (prefers-reduced-motion: reduce) { .orb-drift { animation: none; } }
