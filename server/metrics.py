@@ -274,7 +274,8 @@ async def reference_based(answer: str, reference: str, contexts: List[str]) -> D
 # ───────────────────────── reference-based (deterministic) ─────────────────────────
 
 def recall_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
-    """|retrieved_topk ∩ gold| / |gold|."""
+    """|distinct docs among the top-k chunks ∩ gold| / |gold|. retrieved_ids holds
+    each retrieved chunk's doc id (a doc may repeat)."""
     if not gold_ids:
         return 0.0
     top = set(retrieved_ids[:k])
@@ -283,9 +284,9 @@ def recall_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
 
 
 def precision_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
-    """|retrieved_topk ∩ gold| / k. Divides by k even when fewer than k docs came
-    back (standard definition: an empty slot counts as a miss). Read it alongside
-    recall@k, whose ceiling is k/|gold| when the gold set is larger than k."""
+    """Share of the top-k retrieved chunks that come from a gold doc. Divides by k
+    even when fewer than k chunks came back (an empty slot counts as a miss). Read it
+    alongside recall@k, whose ceiling is k/|gold| when the gold set is larger than k."""
     if k <= 0:
         return 0.0
     gold = set(gold_ids)

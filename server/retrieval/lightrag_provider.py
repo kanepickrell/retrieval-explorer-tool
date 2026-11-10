@@ -320,15 +320,14 @@ async def _search_locked(rag, query, limit, mode, top_k, fresh_keywords=False) -
              for r in _CUR["rels"]
              if r.get("src_id") in nid and r.get("tgt_id") in nid]
     LAST_GRAPH = {"nodes": nodes, "edges": edges}
-    # one row per document (recall@k is doc-level), in LightRAG's final context
-    # order; the doc's first chunk in that order represents it
+    # one row per chunk in LightRAG's final context, in its order (recall@k counts
+    # distinct docs among them)
     tracked = _TRACE.get("tracking", {})
-    seen, out = set(), []
+    out = []
     for c in _CUR["chunks"]:
         title = _title_of(c)
-        if not title or title in seen:
+        if not title:
             continue
-        seen.add(title)
         cid = c.get("chunk_id", "")
         t = tracked.get(cid) or {}
         out.append({"id": title, "label": title, "type": "chunk", "chunk_id": cid,

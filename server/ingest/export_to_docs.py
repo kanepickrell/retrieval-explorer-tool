@@ -7,6 +7,16 @@ per corpus item, ready for LightRAG ingestion.
   agents     -> agent-<slug>.md       (latest manifest: description, system prompt, steps, tools)
   steps      -> step-<slug>.md
   hub tools  -> tool-<slug>.md
+  catalogs   -> catalog-agents.md, catalog-tools.md, catalog-steps.md
+                (one doc listing every item, so "list all the agents" can be
+                answered from a single chunk instead of 15 separate docs)
+  people     -> person-<user-NN>.md: each pseudonymous user's indexed chats
+                (title, date, tags), for "what has user-07 worked on"
+
+Chats end with an "Author: user-NN" line. It goes LAST on purpose: LightRAG
+chunks from the start of a doc, so appending only changes a chat's final chunk
+and a re-index reuses the cached extraction for every other chunk. Only the
+export's pseudonyms are used; real names never enter the corpus.
 
 Trivial chats (greetings / thanks with no real request) are skipped. Doc ids
 keep the source ids so eval gold labels can point at them (chat-<chat_id>.md).
@@ -18,6 +28,7 @@ from __future__ import annotations
 
 import ast
 import json
+from datetime import datetime, timezone
 import re
 import sys
 from collections import defaultdict
@@ -65,6 +76,13 @@ def clip(s: str) -> str:
     return s if len(s) <= MAX_MSG_CHARS else s[:MAX_MSG_CHARS] + "\n…[truncated]"
 
 
+def day(ts) -> str:
+    try:
+        return datetime.fromtimestamp(int(float(ts)), timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        return "unknown date"
+
+
 def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")[:60] or "untitled"
 
@@ -78,6 +96,7 @@ def main(export_dir: str, out_dir: str) -> None:
     msgs = defaultdict(list)
     for m in load(ex / "openwebui/chat_message.json"):
         msgs[m["chat_id"]].append(m)
+    by_person = defaultdict(list)   # user-NN -> [(date, title, tags, doc)]
     for c in load(ex / "openwebui/chat.json"):
         turns = sorted(msgs.get(c["id"], []), key=lambda m: int(m.get("created_at") or 0))
         user_chars = sum(len(msg_text(m)) for m in turns if m["role"] == "user")
@@ -93,7 +112,11 @@ def main(export_dir: str, out_dir: str) -> None:
             t = clip(msg_text(m))
             if t:
                 lines += [f"## {'User' if m['role'] == 'user' else 'Assistant'}", "", t, ""]
-        (out / f"chat-{c['id']}.md").write_text("\n".join(lines), encoding="utf-8")
+        author = c.get("user_id") or "unknown"
+        lines += ["---", f"Author: {author} · started {day(c.get('created_at'))}", ""]   # last: see module docstring
+        doc = f"chat-{c['id']}.md"
+        (out / doc).write_text("\n".join(lines), encoding="utf-8")
+        by_person[author].append((day(c.get("created_at")), c.get("title") or "Chat", tags, doc))
         written["chat"] += 1
 
     # ── files (extracted text) ──
@@ -135,6 +158,46 @@ def main(export_dir: str, out_dir: str) -> None:
                 lines += ["## Definition", "", "```json", clip(json.dumps(rest, indent=2, ensure_ascii=False)), "```", ""]
             (out / f"{kind}-{slug(man.get('slug') or name)}.md").write_text("\n".join(lines), encoding="utf-8")
             written[kind] += 1
+
+    # ── catalogs: one doc listing every hub item of a kind ──
+    def owner(o):
+        return "built-in (system)" if (o or "system") == "system" else o
+
+    installs = defaultdict(int)
+    for i in load(ex / "hub/hub_install.json"):
+        installs[(i.get("kind"), i.get("item_slug"))] += 1
+    for kind, path, plural in (("agent", "hub/agent.json", "agents"),
+                               ("tool", "hub/hub_tool.json", "tools"),
+                               ("step", "hub/step.json", "steps")):
+        items = [x for x in load(ex / path) if not x.get("deleted_at")]
+        items.sort(key=lambda x: (x.get("name") or "").lower())
+        lines = [f"# Agent Hub catalog: all {plural}", "",
+                 f"Agent Hub has {len(items)} {plural}. The complete list:", ""]
+        for x in items:
+            bits = [x.get("description") or ""]
+            if x.get("tags"):
+                bits.append(f"Tags: {', '.join(x['tags'])}.")
+            if x.get("category"):
+                bits.append(f"Category: {x['category']}.")
+            bits.append(f"Owner: {owner(x.get('owner_id'))}.")
+            n = x.get("install_count") or installs.get((kind, x.get("slug")), 0)
+            bits.append(f"Installs: {n}.")
+            if x.get("forked_from_slug"):
+                bits.append(f"Forked from {x['forked_from_slug']}.")
+            lines.append(f"- **{x.get('name')}** (`{x.get('slug')}`): " + " ".join(b for b in bits if b))
+        (out / f"catalog-{plural}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        written["catalog"] += 1
+
+    # ── people: each pseudonymous user's indexed chats ──
+    for person, chats in sorted(by_person.items()):
+        chats.sort()
+        lines = [f"# {person}: chat activity", "",
+                 f"{person} (a pseudonymous Agent Hub user) has {len(chats)} indexed chats. "
+                 f"What {person} has been working on, oldest first:", ""]
+        for d, title, tags, doc in chats:
+            lines.append(f"- {d}: {title}" + (f" (tags: {tags})" if tags else "") + f" [{doc}]")
+        (out / f"person-{person}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        written["person"] += 1
 
     total = sum(p.stat().st_size for p in out.glob("*.md"))
     print(f"wrote {dict(written)} -> {out}  ({total/1024:.0f} KB)")

@@ -111,8 +111,9 @@ LAST_STEPS: List[Dict] = []
 
 
 def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
-    """Return top-k corpus hits as unified rows, deduped to best chunk per title
-    (doc-level, which is what recall@k is scored against)."""
+    """Return the top-k CHUNKS as unified rows (id = the chunk's doc, chunk_id =
+    the chunk). Several chunks of one doc can appear, so a long doc's answer isn't
+    lost to a single "best" chunk; recall@k counts distinct docs among them."""
     global LAST_STEPS
     import time
     LAST_STEPS = []
@@ -129,20 +130,21 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
     t = time.perf_counter()
     mat, titles, contents, ids = idx["mat"], idx["titles"], idx["contents"], idx["ids"]
     # rows are normalized and qv is normalized -> cosine == dot
-    best: Dict[str, Dict] = {}
+    scored = []
     for i, row in enumerate(mat):
         dot = 0.0
         for a, b in zip(qv, row):
             dot += a * b
+        scored.append((dot, i))
+    scored.sort(reverse=True)
+    out = []
+    for dot, i in scored[:limit]:
         title = titles[i] or ids[i]
-        prev = best.get(title)
-        if prev is None or dot > prev["relevance_score"]:
-            best[title] = {"id": title, "label": title, "type": "chunk",
-                           "description": (contents[i] or "")[:200],
-                           "content": (contents[i] or "")[:1800],
-                           "relevance_score": round(float(dot), 4),
-                           "source": "vector", "chunk_id": ids[i]}
-    out = sorted(best.values(), key=lambda r: r["relevance_score"], reverse=True)[:limit]
+        out.append({"id": title, "label": title, "type": "chunk",
+                    "description": (contents[i] or "")[:200],
+                    "content": contents[i] or "",
+                    "relevance_score": round(float(dot), 4),
+                    "source": "vector", "chunk_id": ids[i]})
     score_ms = round((time.perf_counter() - t) * 1000, 1)
     for rank, r in enumerate(out, 1):
         r["rank"], r["via"] = rank, "C"
@@ -150,8 +152,8 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
                     "stat": f"{len(ids)} chunks", "ms": load_ms}] if load_ms > 5 else []) + [
         {"label": "Embed query", "detail": f"{EMBED_MODEL} via Ollama, 'search_query:' prefix",
          "stat": f"{idx['dim']}d", "ms": embed_ms},
-        {"label": "Cosine search", "detail": "score every chunk, keep the best chunk per document",
-         "stat": f"{len(ids)} chunks → {len(best)} docs → top {len(out)}", "ms": score_ms},
+        {"label": "Cosine search", "detail": "score every chunk, keep the top-k chunks (a doc can contribute several)",
+         "stat": f"{len(ids)} chunks → top {len(out)} from {len({r['id'] for r in out})} docs", "ms": score_ms},
     ]
     return out
 

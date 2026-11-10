@@ -13,8 +13,8 @@ const SHORT: Record<string, string> = {
   precision_at_k: "precision@k",
 };
 const HINT: Record<string, string> = {
-  recall_at_k: "gold docs in the top k ÷ all gold docs. Can't exceed k ÷ gold size when the gold set is bigger than k — read with precision@k.",
-  precision_at_k: "gold docs in the top k ÷ k: how much of what was retrieved is relevant.",
+  recall_at_k: "distinct gold docs among the top-k chunks ÷ all gold docs. Can't exceed k ÷ gold size when the gold set is bigger than k — read with precision@k.",
+  precision_at_k: "share of the top-k chunks that come from a gold doc: how much of what was retrieved is relevant.",
 };
 
 // the tiles shown before evaluation — all pending (no fabricated values)

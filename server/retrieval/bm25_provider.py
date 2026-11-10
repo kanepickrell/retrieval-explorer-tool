@@ -8,8 +8,9 @@ BM25 + vector fusion by Reciprocal Rank Fusion.
                retrieval, which pairs embeddings with BM25)
 
 Corpus = the chunks in the dataset's vdb_chunks.json (via vector_provider), so all
-techniques retrieve from identical chunks. Rows are doc-level (best chunk per doc),
-like vector, because recall@k is scored on docs.
+techniques retrieve from identical chunks. Rows are CHUNKS (several may come from
+one doc); recall@k counts distinct docs among them. Fusion ranks chunks too, so a
+chunk found by both BM25 and vector is the same chunk, not just the same doc.
 
 Tokenizer: lowercase; compound tokens such as "t1558.003", "obap_3.resource",
 "c2library.py" are kept whole AND split into their parts, so both an exact
@@ -62,8 +63,8 @@ def _index(storage_dir: str = None) -> Tuple[Dict, float]:
     return _BM25[key], round((time.perf_counter() - t) * 1000, 1)
 
 
-def _bm25_docs(query: str, storage_dir: str = None) -> Tuple[List[Dict], List[Dict]]:
-    """All docs ranked by BM25 (best chunk per doc). Returns (rows, steps)."""
+def _bm25_chunks(query: str, storage_dir: str = None) -> Tuple[List[Dict], List[Dict]]:
+    """All chunks with a term match, ranked by BM25. Returns (rows, steps)."""
     ix, build_ms = _index(storage_dir)
     idx, bm25 = ix["vec"], ix["bm25"]
     steps = []
@@ -75,18 +76,18 @@ def _bm25_docs(query: str, storage_dir: str = None) -> Tuple[List[Dict], List[Di
     t = time.perf_counter()
     q = tokenize(query)
     scores = bm25.get_scores(q)
-    best: Dict[str, Dict] = {}
+    rows = []
     for i, s in enumerate(scores):
-        title = idx["titles"][i] or idx["ids"][i]
-        if title not in best or s > best[title]["bm25_score"]:
-            best[title] = {"id": title, "label": title, "type": "chunk", "chunk_id": idx["ids"][i],
-                           "description": (idx["contents"][i] or "")[:200],
-                           "content": (idx["contents"][i] or "")[:1800],
-                           "bm25_score": round(float(s), 4)}
-    rows = sorted((r for r in best.values() if r["bm25_score"] > 0), key=lambda r: r["bm25_score"], reverse=True)
+        if s > 0:
+            title = idx["titles"][i] or idx["ids"][i]
+            rows.append({"id": title, "label": title, "type": "chunk", "chunk_id": idx["ids"][i],
+                         "description": (idx["contents"][i] or "")[:200],
+                         "content": idx["contents"][i] or "",
+                         "bm25_score": round(float(s), 4)})
+    rows.sort(key=lambda r: r["bm25_score"], reverse=True)
     steps.append({"label": "BM25 keyword search",
                   "detail": f"query terms: {', '.join(dict.fromkeys(q)) or '(none)'}",
-                  "stat": f"{len(scores)} chunks → {len(rows)} docs with a term match",
+                  "stat": f"{len(scores)} chunks → {len(rows)} with a term match",
                   "ms": round((time.perf_counter() - t) * 1000, 1)})
     return rows, steps
 
@@ -99,7 +100,7 @@ def _with_cosine(rows: List[Dict], query: str, storage_dir: str) -> None:
 
 def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
     global LAST_STEPS
-    rows, steps = _bm25_docs(query, storage_dir)
+    rows, steps = _bm25_chunks(query, storage_dir)
     out = rows[:limit]
     for rank, r in enumerate(out, 1):
         r.update(rank=rank, via="B", source="bm25")
@@ -109,9 +110,9 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
 
 
 def search_fused(query: str, limit: int = 20, storage_dir: str = None, depth: int = 50) -> List[Dict]:
-    """Reciprocal Rank Fusion of the BM25 and vector doc rankings (each to `depth`)."""
+    """Reciprocal Rank Fusion of the BM25 and vector CHUNK rankings (each to `depth`)."""
     global LAST_STEPS
-    b_rows, steps = _bm25_docs(query, storage_dir)
+    b_rows, steps = _bm25_chunks(query, storage_dir)
     b_rows = b_rows[:depth]
     v_rows = vp.search(query, depth, storage_dir=storage_dir)
     steps += vp.LAST_STEPS
@@ -119,8 +120,7 @@ def search_fused(query: str, limit: int = 20, storage_dir: str = None, depth: in
     fused: Dict[str, Dict] = {}
     for src, lst in (("B", b_rows), ("C", v_rows)):
         for rank, r in enumerate(lst, 1):
-            # a doc found by both keeps the BM25 row's chunk (first seen) as its representative
-            f = fused.setdefault(r["id"], {**r, "rrf_score": 0.0, "via_set": []})
+            f = fused.setdefault(r["chunk_id"], {**r, "rrf_score": 0.0, "via_set": []})
             f["rrf_score"] += 1.0 / (RRF_K + rank)
             f["via_set"].append(src)
     out = sorted(fused.values(), key=lambda r: r["rrf_score"], reverse=True)[:limit]
@@ -130,7 +130,7 @@ def search_fused(query: str, limit: int = 20, storage_dir: str = None, depth: in
         r.update(rank=rank, via="B+C" if len(srcs) == 2 else srcs.pop(), source="bm25_vector",
                  rrf_score=round(r["rrf_score"], 5))
     steps.append({"label": "Reciprocal rank fusion",
-                  "detail": f"score = Σ 1/({RRF_K} + rank) over the BM25 and vector rankings (top {depth} each)",
+                  "detail": f"score = Σ 1/({RRF_K} + rank) over the BM25 and vector chunk rankings (top {depth} each)",
                   "stat": f"{both} of top {len(out)} found by both",
                   "ms": round((time.perf_counter() - t) * 1000, 1)})
     LAST_STEPS = steps
