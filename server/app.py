@@ -45,6 +45,8 @@ app.add_middleware(
 )
 init_graph_search(None)          # retrieval is corpus-backed; no GraphDB handle needed
 app.include_router(search_router)  # mounts /api/search/unified and friends
+from assist import router as assist_router  # noqa: E402
+app.include_router(assist_router)  # /api/assist (chime-in)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 

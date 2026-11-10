@@ -28,6 +28,9 @@ type Ctx = {
   chunkTopK: number;
   setChunkTopK: (v: number) => void;
   result: RetrievalResult | null;
+  /** show a retrieval produced elsewhere (e.g. a chat chime-in) in the Explorer panels,
+   *  without re-running anything; cancels any in-flight one-off retrieval */
+  showResult: (r: RetrievalResult) => void;
   /** bumps every time a new result lands */
   resultKey: number;
   loading: boolean;
@@ -88,6 +91,13 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(t);
   }, [datasetId, query, runNonce, technique, topK, chunkTopK]);
 
+  const showResult = useCallback((r: RetrievalResult) => {
+    reqId.current++;            // supersede any in-flight one-off retrieval
+    setLoading(false);
+    setResult(r);
+    setResultKey((k) => k + 1);
+  }, []);
+
   const run = useCallback((q: string) => {
     setHighlight(null);
     setQuery(q);
@@ -98,7 +108,7 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
     datasets, datasetId, setDatasetId, refreshDatasets, error, reportError: setError, highlight, setHighlight,
     dataset: datasets.find((d) => d.id === datasetId),
     query, run, runNonce, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
-    result, resultKey, loading,
+    result, showResult, resultKey, loading,
   }), [datasets, datasetId, refreshDatasets, error, highlight, query, run, runNonce, technique, topK, chunkTopK, result, resultKey, loading]);
 
   return <ExplorerCtx.Provider value={value}>{children}</ExplorerCtx.Provider>;

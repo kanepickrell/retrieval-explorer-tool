@@ -60,6 +60,16 @@ async def unified_search(
 ):
     """Retrieve under one strategy and store the result as a run. Returns run_id:
     /answer and /metrics take it, so they work on exactly this retrieval."""
+    return await run_unified(q, limit, force_strategy, dataset, top_k, fresh_keywords)
+
+
+async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = None,
+                      dataset: Optional[str] = None, top_k: Optional[int] = None,
+                      fresh_keywords: bool = False, exclude_docs: Optional[set] = None) -> dict:
+    """The retrieval behind /unified, callable directly (e.g. by /api/assist).
+    exclude_docs: doc ids to drop from the results (a replayed chat must not
+    retrieve itself); excluded docs are removed before the run is stored, so
+    answers and metrics never see them either."""
     t0 = time.time()
     ds = DS.get(dataset)
     sd = str(ds.storage)
@@ -78,6 +88,10 @@ async def unified_search(
             results = (bm25_provider.search(q, limit, sd) if strategy == "bm25"
                        else bm25_provider.search_fused(q, limit, sd))
             steps = bm25_provider.LAST_STEPS
+        if exclude_docs:
+            results = [r for r in results if r["id"] not in exclude_docs]
+            for i, r in enumerate(results, 1):
+                r["rank"] = i
         contexts = [r.pop("content", "") for r in results]
         # exactly the context naive RAG generates over
         context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
@@ -98,6 +112,19 @@ async def unified_search(
             steps = lightrag_provider.LAST_STEPS
             contexts = lightrag_provider.LAST_CONTEXT_CHUNKS
             system_prompt = lightrag_provider.LAST_PROMPT
+            if exclude_docs:
+                # drop the excluded docs' chunks from the rows; LightRAG's rendered prompt
+                # can't be edited safely, so answers for such runs use naive RAG over the
+                # remaining chunks instead (system_prompt=None)
+                keep = [i for i, r in enumerate(results) if r["id"] not in exclude_docs]
+                if len(keep) != len(results):
+                    results = [results[i] for i in keep]
+                    for i, r in enumerate(results, 1):
+                        r["rank"] = i
+                    excluded_ids = {c for c in exclude_docs}
+                    contexts = [c for c, ch in zip(contexts, lightrag_provider._CUR["chunks"])
+                                if lightrag_provider._title_of(ch) not in excluded_ids]
+                    system_prompt = None
             context_text = system_prompt or ""
             if not results:
                 note = lightrag_provider.LAST_ERROR or "lightrag returned no context for this query"

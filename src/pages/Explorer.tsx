@@ -6,6 +6,7 @@ import { deriveSignals } from "@/lib/signals";
 import QuestionCard from "@/components/QuestionCard";
 import ModeCard from "@/components/ModeCard";
 import GraphCanvas from "@/components/GraphCanvas";
+import ChatPanel from "@/components/ChatPanel";
 import InspectorTabs from "@/components/InspectorTabs";
 
 const EMPTY = { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
@@ -87,6 +88,12 @@ export default function Explorer() {
     Escape: () => { setSelectedId(null); setActiveChunk(null); setHighlight(null); },
   });
 
+  // question box: a one-off retrieval question, or a chat where the explorer chimes in
+  const [qmode, setQmode] = useState<"oneoff" | "chat">(() => {
+    try { return localStorage.getItem("explorer.qmode") === "chat" ? "chat" : "oneoff"; } catch { return "oneoff"; }
+  });
+  useEffect(() => { try { localStorage.setItem("explorer.qmode", qmode); } catch { /* storage unavailable */ } }, [qmode]);
+
   const signals = useMemo(() => deriveSignals(result), [result]);
   const chunkHighlight = useMemo(
     () => (activeChunk ? { label: activeChunk.title, ids: activeChunk.entities ?? [] } : null),
@@ -96,8 +103,25 @@ export default function Explorer() {
   return (
     <main className="mt-5 flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-        <QuestionCard samples={dataset?.samples} value={input} onChange={setInput} onRun={run} loading={loading}
-          activeQuery={result ? query : ""} inputRef={inputRef} />
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <div role="radiogroup" aria-label="Question mode" className="flex rounded-md border border-line bg-bg p-0.5">
+              {([["oneoff", "One-off question", "Ask a single question and inspect how each technique retrieves for it"],
+                 ["chat", "Chat · chime-in", "Play out a conversation; the retrieval explorer chimes in with docs that would help"]] as const).map(([id, label, title]) => (
+                <button key={id} role="radio" aria-checked={qmode === id} title={title} onClick={() => setQmode(id)}
+                  className={qmode === id ? "rounded bg-surface-2 px-3 py-1 text-xs text-ink" : "rounded px-3 py-1 text-xs text-muted hover:text-ink"}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          {qmode === "oneoff" ? (
+            <QuestionCard samples={dataset?.samples} value={input} onChange={setInput} onRun={run} loading={loading}
+              activeQuery={result ? query : ""} inputRef={inputRef} />
+          ) : (
+            <section className="card h-[460px] p-3"><ChatPanel /></section>
+          )}
+        </div>
         <ModeCard technique={technique} onTechnique={setTechnique} topK={topK} onTopK={setTopK} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:h-[700px] lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">

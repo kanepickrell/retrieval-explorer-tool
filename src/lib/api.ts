@@ -250,3 +250,65 @@ export async function evaluate(
     return { metrics: [], answer: "", goldMatched: false, timeMs: 0, note: `metrics failed: ${(err as Error).message}` };
   }
 }
+
+// ───────────────────────── Assist (chime-in) ─────────────────────────
+
+export type ChatTurn = { role: "user" | "assistant"; content: string };
+export type QueryStrategy = "last" | "window" | "rewrite";
+export type ReplayChat = { chatId: string; doc: string; title: string; author: string | null; userTurns: number; turns: ChatTurn[] };
+export type AssistSuggestion = {
+  doc: string; chunkId: string | null; title: string; snippet: string;
+  score: number | null; rank: number | null; via?: string;
+  /** LLM usefulness verdict (undefined when the LLM check is off) */
+  useful?: boolean | null; why?: string;
+};
+export type AssistStage = { label: string; detail: string; stat: string; ms: number };
+export type AssistResult = {
+  query: string | null; stayQuiet: boolean; reason: string | null;
+  suggestions: AssistSuggestion[]; candidates: AssistSuggestion[];
+  stages: AssistStage[]; totalMs: number;
+  /** the retrieval behind this chime-in, as a normal run (opens in the Explorer panels) */
+  retrieval: RetrievalResult | null;
+};
+
+export async function listReplayChats(datasetId: string): Promise<ReplayChat[]> {
+  const d = await getJson("/api/assist/chats", { dataset: datasetId });
+  return (d ?? []).map((c: any) => ({
+    chatId: String(c.chat_id), doc: String(c.doc), title: String(c.title), author: c.author ?? null,
+    userTurns: Number(c.user_turns ?? 0), turns: (c.turns ?? []) as ChatTurn[],
+  }));
+}
+
+const mapSuggestion = (x: any): AssistSuggestion => ({
+  doc: String(x.doc), chunkId: x.chunk_id ?? null, title: String(x.title ?? x.doc), snippet: String(x.snippet ?? ""),
+  score: typeof x.score === "number" ? x.score : null, rank: typeof x.rank === "number" ? x.rank : null,
+  via: x.via ?? undefined, useful: x.useful, why: x.why ? String(x.why) : undefined,
+});
+
+export async function assist(opts: {
+  datasetId: string; turns: ChatTurn[]; technique: Technique; queryStrategy: QueryStrategy;
+  limit: number; topK: number; llmFilter: boolean; minScore: number;
+  excludeDocs: string[]; alreadySuggested: string[];
+}): Promise<AssistResult> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}/api/assist`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset: opts.datasetId, turns: opts.turns, technique: opts.technique, query_strategy: opts.queryStrategy,
+        limit: opts.limit, top_k: opts.topK, llm_filter: opts.llmFilter, min_score: opts.minScore,
+        exclude_docs: opts.excludeDocs, already_suggested: opts.alreadySuggested,
+      }),
+    });
+  } catch {
+    throw new ApiError(`backend unreachable at ${API_BASE}`);
+  }
+  if (!r.ok) throw new ApiError(`/api/assist → ${r.status}`);
+  const d = await r.json();
+  return {
+    query: d.query ?? null, stayQuiet: !!d.stay_quiet, reason: d.reason ?? null,
+    suggestions: (d.suggestions ?? []).map(mapSuggestion), candidates: (d.candidates ?? []).map(mapSuggestion),
+    stages: d.stages ?? [], totalMs: Math.round(Number(d.total_ms ?? 0)),
+    retrieval: d.retrieval ? mapResult(d.retrieval, opts.technique, opts.topK, opts.limit) : null,
+  };
+}
