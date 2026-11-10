@@ -7,6 +7,10 @@ LightRAG storage and gold eval set live.
   <export folder>      every datasets/incoming/<name>/ that has a storage/ dir
                        (built by ingest/build_index.py); gold = eval_set.json,
                        docs = docs/
+  <export>~<variant>   each storage-<variant>/ dir in the same export: an alternative
+                       index of the same docs (e.g. storage-structured = a different
+                       chunker), sharing the export's gold set, for side-by-side tests.
+                       Underscore names (storage_v2, storage_backup...) are ignored.
 
 Status comes from LightRAG's own doc-status store, so a dataset whose index is
 still building reports `indexing` with progress and is not queryable yet.
@@ -44,10 +48,15 @@ def _registry() -> Dict[str, Dataset]:
     incoming = _HERE / "datasets" / "incoming"
     if incoming.is_dir():
         for d in sorted(incoming.iterdir()):
+            pretty = d.name.replace("agenthub-export-", "Agent Hub export ")
             if (d / "storage").is_dir():
-                pretty = d.name.replace("agenthub-export-", "Agent Hub export ")
                 out[d.name] = Dataset(d.name, pretty, "chat", d / "storage",
                                       d / "eval_set.json", d / "docs")
+            for v in sorted(d.glob("storage-*")):
+                if v.is_dir():
+                    variant = v.name[len("storage-"):]
+                    out[f"{d.name}~{variant}"] = Dataset(f"{d.name}~{variant}", f"{pretty} · {variant}", "chat",
+                                                         v, d / "eval_set.json", d / "docs")
     return out
 
 
