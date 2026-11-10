@@ -48,6 +48,8 @@ export type Dataset = {
   id: string; name: string; kind: "chat" | "document" | "user";
   /** documents indexed so far */
   rows: number; expectedRows: number; failedRows: number;
+  /** source docs whose content was already indexed under another id (indexed once) */
+  duplicateRows: number;
   updated: string | null;
   /** has a gold eval set (enables reference-based metrics) */
   labeled: boolean; goldQueries: number; hasReferenceAnswers: boolean;
@@ -107,6 +109,7 @@ export async function listDatasets(): Promise<Dataset[]> {
   return (d ?? []).map((x: any) => ({
     id: String(x.id), name: String(x.name), kind: (x.kind ?? "chat") as Dataset["kind"],
     rows: Number(x.rows ?? 0), expectedRows: Number(x.expected_rows ?? 0), failedRows: Number(x.failed_rows ?? 0),
+    duplicateRows: Number(x.duplicate_rows ?? 0),
     updated: x.updated ?? null,
     labeled: !!x.labeled, goldQueries: Number(x.gold_queries ?? 0), hasReferenceAnswers: !!x.has_reference_answers,
     status: (x.status ?? "missing") as DatasetStatus,

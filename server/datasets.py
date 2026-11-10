@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,16 +63,45 @@ def _read(p: Path):
         return None
 
 
+def _is_content_dup(v: dict) -> bool:
+    return "Identical content already exists" in (v.get("error_msg") or "")
+
+
+def duplicate_aliases(ds: Dataset) -> Dict[str, str]:
+    """{duplicate doc file -> original doc file} for docs LightRAG skipped because
+    the same content was already indexed under another id. Retrieval can only ever
+    return the original, so gold labels must point at it too."""
+    status = _read(ds.storage / "kv_store_doc_status.json") or {}
+    out = {}
+    for v in status.values():
+        if isinstance(v, dict) and _is_content_dup(v):
+            m = re.search(r"Original doc_id: ([^,]+)", v.get("error_msg") or "")
+            if m and v.get("file_path"):
+                orig = status.get(m.group(1), {})
+                out[v["file_path"]] = orig.get("file_path") or f"{m.group(1)}.md"
+    return out
+
+
 def gold_entries(ds: Dataset) -> List[dict]:
     g = _read(ds.gold) if ds.gold and ds.gold.exists() else None
-    return g if isinstance(g, list) else []
+    if not isinstance(g, list):
+        return []
+    alias = duplicate_aliases(ds)
+    if alias:
+        for e in g:
+            ids = [alias.get(x, x) for x in e.get("gold_ids", [])]
+            e["gold_ids"] = list(dict.fromkeys(ids))  # map dups -> original, dedupe, keep order
+    return g
 
 
 def describe(ds: Dataset) -> dict:
     status = _read(ds.storage / "kv_store_doc_status.json") or {}
-    processed = sum(1 for v in status.values() if isinstance(v, dict) and v.get("status") == "processed")
-    failed = sum(1 for v in status.values() if isinstance(v, dict) and v.get("status") == "failed")
-    expected = len(list(ds.docs_dir.glob("*.md"))) if ds.docs_dir and ds.docs_dir.is_dir() else len(status)
+    rows = [v for v in status.values() if isinstance(v, dict)]
+    processed = sum(1 for v in rows if v.get("status") == "processed")
+    duplicates = sum(1 for v in rows if v.get("status") == "failed" and _is_content_dup(v))
+    failed = sum(1 for v in rows if v.get("status") == "failed" and not _is_content_dup(v))
+    source_docs = len(list(ds.docs_dir.glob("*.md"))) if ds.docs_dir and ds.docs_dir.is_dir() else len(status)
+    expected = source_docs - duplicates   # duplicates are indexed once, under the original
     has_index = (ds.storage / "graph_chunk_entity_relation.graphml").exists() and (ds.storage / "vdb_chunks.json").exists()
     if not has_index:
         state = "missing" if not status else "indexing"
@@ -86,6 +116,7 @@ def describe(ds: Dataset) -> dict:
     return {
         "id": ds.id, "name": ds.name, "kind": ds.kind,
         "rows": processed, "expected_rows": expected, "failed_rows": failed,
+        "duplicate_rows": duplicates,
         "updated": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d") if mtime else None,
         "labeled": bool(gold), "gold_queries": len(gold),
         "has_reference_answers": any(g.get("reference") for g in gold),
