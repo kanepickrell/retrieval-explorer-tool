@@ -44,9 +44,15 @@ _LOCK: Optional[asyncio.Lock] = None
 # LightRAG's context is captured through a module-level tap (_CUR), so queries
 # must not overlap or one query's subgraph/answer leaks into another's result.
 _QUERY_LOCK: Optional[asyncio.Lock] = None
-_CUR: Dict[str, list] = {"ctx": [], "ents": [], "rels": []}  # per-query capture
+_CUR: Dict[str, list] = {"ctx": [], "ents": [], "rels": [], "chunks": []}  # per-query capture
+# per-query trace of LightRAG's real pipeline stages (timings, keywords, counts)
+_TRACE: Dict = {}
 # the subgraph LightRAG touched on the last query, for the retrieval graph UI
 LAST_GRAPH: Dict[str, list] = {"nodes": [], "edges": []}
+# real pipeline steps of the last query: [{label, detail, stat, ms}]
+LAST_STEPS: List[Dict] = []
+# error from the last query, if LightRAG raised (surfaced instead of "0 results")
+LAST_ERROR: Optional[str] = None
 # the generated answer from the last query run with generate=True
 LAST_ANSWER: str = ""
 # wall time of the last LightRAG query, excluding time spent waiting for _QUERY_LOCK
@@ -84,25 +90,118 @@ async def _ollama_embed(texts, **kwargs):
     return np.array(d["embeddings"], dtype=np.float32)
 
 
-def _install_tap():
-    """Wrap _build_context_str to capture the final selected chunk titles."""
-    if getattr(op._build_context_str, "_pg_tapped", False):
+def _wrap_stage(name: str, record):
+    """Wrap one of LightRAG's module-level pipeline functions so each call is
+    timed and its real outputs recorded into _TRACE. kg_query resolves these
+    through the operate module's globals, so patching the module is enough.
+    Safe only because queries are serialized by _QUERY_LOCK."""
+    orig = getattr(op, name)
+    if getattr(orig, "_pg_tapped", False):
         return
-    orig = op._build_context_str
 
     async def wrapped(*a, **k):
+        t = time.perf_counter()
         res = await orig(*a, **k)
+        _TRACE.setdefault("ms", {})[name] = round((time.perf_counter() - t) * 1000, 1)
         try:
-            _, raw = res
-            data = (raw or {}).get("data", {})
-            _CUR["ctx"] = [_title_of(c) for c in data.get("chunks", [])]
-            _CUR["ents"] = data.get("entities", []) or []
-            _CUR["rels"] = data.get("relationships", []) or []
-        except Exception:
-            pass
+            record(res, a, k)
+        except Exception as e:  # tracing must never break retrieval
+            _TRACE.setdefault("trace_errors", []).append(f"{name}: {e!r}"[:120])
         return res
     wrapped._pg_tapped = True
-    op._build_context_str = wrapped
+    setattr(op, name, wrapped)
+
+
+def _rec_keywords(res, a, k):
+    hl, ll = res
+    _TRACE["hl"], _TRACE["ll"] = list(hl or []), list(ll or [])
+
+
+def _rec_search(res, a, k):
+    _TRACE["raw"] = {"entities": len(res.get("final_entities") or []),
+                     "relations": len(res.get("final_relations") or []),
+                     "vector_chunks": len(res.get("vector_chunks") or [])}
+    # keep the SAME dict object: in local/global/hybrid it is still empty here and
+    # LightRAG fills it later, during _merge_all_chunks (`or {}` would drop that)
+    tracking = res.get("chunk_tracking")
+    _TRACE["tracking"] = tracking if tracking is not None else {}
+
+
+def _rec_truncate(res, a, k):
+    _TRACE["kept"] = {"entities": len(res.get("filtered_entities") or []),
+                      "relations": len(res.get("filtered_relations") or [])}
+
+
+def _rec_merge(res, a, k):
+    _TRACE["merged_chunks"] = len(res or [])
+
+
+def _rec_context(res, a, k):
+    _, raw = res
+    data = (raw or {}).get("data", {})
+    _CUR["chunks"] = data.get("chunks", []) or []
+    _CUR["ctx"] = [_title_of(c) for c in _CUR["chunks"]]
+    _CUR["ents"] = data.get("entities", []) or []
+    _CUR["rels"] = data.get("relationships", []) or []
+
+
+def _install_tap():
+    _wrap_stage("get_keywords_from_query", _rec_keywords)
+    _wrap_stage("_perform_kg_search", _rec_search)
+    _wrap_stage("_apply_token_truncation", _rec_truncate)
+    _wrap_stage("_merge_all_chunks", _rec_merge)
+    _wrap_stage("_build_context_str", _rec_context)
+
+
+_MODE_SEARCH = {
+    "local": "entities matched on low-level keywords, then their relations",
+    "global": "relations matched on high-level keywords, then their entities",
+    "hybrid": "local (entities) + global (relations), merged",
+    "mix": "local + global graph search, plus vector search over chunks",
+}
+
+
+def _build_steps(mode: str, top_k: int, chunk_top_k: int, total_ms: float, generate: bool) -> List[Dict]:
+    """Turn the trace of one real LightRAG query into UI steps. Every stat and
+    timing here was measured on this query; nothing is reconstructed."""
+    ms = _TRACE.get("ms", {})
+    hl, ll = _TRACE.get("hl", []), _TRACE.get("ll", [])
+    raw = _TRACE.get("raw", {})
+    kept = _TRACE.get("kept", {})
+    tracked = _TRACE.get("tracking", {})
+    by_src = {"E": 0, "R": 0, "C": 0}
+    for c in _CUR["chunks"]:
+        s = (tracked.get(c.get("chunk_id")) or {}).get("source")
+        if s in by_src:
+            by_src[s] += 1
+    steps = [
+        {"label": "Extract keywords (LLM)",
+         "detail": f"high-level: {', '.join(hl) or '(none)'} · low-level: {', '.join(ll) or '(none)'}",
+         "stat": f"{len(hl)} hl · {len(ll)} ll", "ms": ms.get("get_keywords_from_query")},
+        {"label": "Search graph" + (" + vectors" if mode == "mix" else ""),
+         "detail": _MODE_SEARCH.get(mode, mode) + f" (top_k {top_k}, chunk_top_k {chunk_top_k})",
+         "stat": f"{raw.get('entities', 0)}E · {raw.get('relations', 0)}R" + (f" · {raw.get('vector_chunks', 0)}C" if mode == "mix" else ""),
+         "ms": ms.get("_perform_kg_search")},
+        {"label": "Truncate to token budget",
+         "detail": "drop lowest-ranked entities/relations that exceed the context token limits",
+         "stat": f"kept {kept.get('entities', 0)}E · {kept.get('relations', 0)}R",
+         "ms": ms.get("_apply_token_truncation")},
+        {"label": "Merge chunks",
+         "detail": "round-robin merge of vector, entity and relation chunks, deduplicated",
+         "stat": f"{_TRACE.get('merged_chunks', 0)} chunks", "ms": ms.get("_merge_all_chunks")},
+        {"label": "Build final context",
+         "detail": f"chunks by source: {by_src['E']} from entities, {by_src['R']} from relations, {by_src['C']} from vector search",
+         "stat": f"{len(_CUR['ents'])}E · {len(_CUR['rels'])}R · {len(_CUR['chunks'])}C",
+         "ms": ms.get("_build_context_str")},
+    ]
+    staged = sum(v for v in ms.values() if v)
+    if generate:
+        steps.append({"label": "Generate answer (LLM)", "detail": "LightRAG answer prompt over the final context",
+                      "stat": "", "ms": round(max(0.0, total_ms - staged), 1)})
+    elif total_ms - staged > 50:
+        steps.append({"label": "Other", "detail": "LightRAG overhead outside the traced stages",
+                      "stat": "", "ms": round(total_ms - staged, 1)})
+    return steps
 
 
 async def _ensure_session():
@@ -147,29 +246,43 @@ async def search(query: str, limit: int = 20, mode: str = None, generate: bool =
     With generate=True, LightRAG also writes a grounded answer (over THIS mode's
     graph+chunk context) into the module global LAST_ANSWER. The context tap fires
     either way, so the touched subgraph (LAST_GRAPH) is captured regardless."""
-    global LAST_QUERY_MS
+    global LAST_QUERY_MS, LAST_STEPS
     rag = await _ensure_rag(storage_dir)
+    mode = mode or MODE
+    top_k = top_k or max(20, limit)
     async with _QUERY_LOCK:
         t0 = time.perf_counter()  # timed inside the lock: excludes queue wait behind other queries
         try:
-            return await _search_locked(rag, query, limit, mode, generate, top_k)
+            rows = await _search_locked(rag, query, limit, mode, generate, top_k)
         finally:
             LAST_QUERY_MS = round((time.perf_counter() - t0) * 1000, 1)
+        LAST_STEPS = _build_steps(mode, top_k, limit, LAST_QUERY_MS, generate)
+    # real relevance: cosine(query, chunk) with the same embeddings vector mode
+    # uses, so scores are comparable across techniques (computed outside the timing)
+    if rows:
+        from retrieval import vector_provider
+        sims = vector_provider.cosine_for([r["chunk_id"] for r in rows], query, storage_dir)
+        for r in rows:
+            r["relevance_score"] = sims.get(r["chunk_id"])
+    return rows
 
 
 async def _search_locked(rag, query, limit, mode, generate, top_k) -> List[Dict]:
-    global LAST_GRAPH, LAST_ANSWER
-    _CUR["ctx"], _CUR["ents"], _CUR["rels"] = [], [], []
+    global LAST_GRAPH, LAST_ANSWER, LAST_ERROR
+    _CUR["ctx"], _CUR["ents"], _CUR["rels"], _CUR["chunks"] = [], [], [], []
+    _TRACE.clear()
     LAST_GRAPH = {"nodes": [], "edges": []}
     LAST_ANSWER = ""
+    LAST_ERROR = None
     try:
         ans = await rag.aquery(query, param=QueryParam(
-            mode=mode or MODE, top_k=top_k or max(20, limit), chunk_top_k=limit,
+            mode=mode, top_k=top_k, chunk_top_k=limit,
             max_total_tokens=12000, enable_rerank=False,
             only_need_context=not generate))
         if generate and isinstance(ans, str):
             LAST_ANSWER = ans
-    except Exception:
+    except Exception as e:
+        LAST_ERROR = f"lightrag query failed: {e!r}"[:200]
         return []
     # build the touched subgraph for the retrieval graph UI
     nodes = [{"id": e.get("entity_name", ""), "label": e.get("entity_name", ""),
@@ -182,14 +295,23 @@ async def _search_locked(rag, query, limit, mode, generate, top_k) -> List[Dict]
              for r in _CUR["rels"]
              if r.get("src_id") in nid and r.get("tgt_id") in nid]
     LAST_GRAPH = {"nodes": nodes, "edges": edges}
+    # one row per document (recall@k is doc-level), in LightRAG's final context
+    # order; the doc's first chunk in that order represents it
+    tracked = _TRACE.get("tracking", {})
     seen, out = set(), []
-    for i, title in enumerate(_CUR["ctx"]):
+    for c in _CUR["chunks"]:
+        title = _title_of(c)
         if not title or title in seen:
             continue
         seen.add(title)
-        out.append({"id": title, "label": title, "type": "chunk",
-                    "description": "", "relevance_score": round(1.0 - i * 0.01, 4),
-                    "source": f"lightrag:{mode or MODE}"})
+        cid = c.get("chunk_id", "")
+        t = tracked.get(cid) or {}
+        out.append({"id": title, "label": title, "type": "chunk", "chunk_id": cid,
+                    "description": (c.get("content") or "")[:200],
+                    "rank": len(out) + 1,
+                    # E = reached via an entity, R = via a relation, C = vector search
+                    "via": t.get("source"),
+                    "source": f"lightrag:{mode}"})
         if len(out) >= limit:
             break
     return out

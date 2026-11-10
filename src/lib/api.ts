@@ -22,7 +22,13 @@ export type Technique = "vector" | "local" | "global" | "hybrid" | "mix";
 export type GraphNode = { id: string; label: string; cluster: string; type: string; size: number; description?: string };
 export type GraphEdge = { id: string; source: string; target: string; weight: number; label?: string };
 export type Step = { label: string; detail: string; stat?: string; ms?: number };
-export type Chunk = { id: string; title: string; source: string; score: number; snippet?: string; entities?: string[] };
+/** One retrieved document (its best/first chunk). score = cosine(query, chunk) with the
+ *  same embeddings for every technique (null if the chunk has no embedding); `via` is how
+ *  LightRAG reached it: E = entity, R = relation, C = vector search. */
+export type Chunk = {
+  id: string; title: string; source: string; score: number | null; rank: number;
+  via?: "E" | "R" | "C"; snippet?: string; entities?: string[];
+};
 export type Metric = { key: string; label: string; value: number; referenceBased: boolean; pending?: boolean };
 export type RetrievalResult = {
   strategy: Technique; timeMs: number;
@@ -135,9 +141,9 @@ export async function runRetrieval(
 }
 
 /** Map the backend's unified-search response onto RetrievalResult.
- *  The graph, chunks, counts and total time are real. Quality metrics start
+ *  Graph, chunks, scores, steps and timings are all measured by the backend. Quality metrics start
  *  `pending`; they are computed on demand by evaluate(). */
-function mapResult(d: any, technique: Technique, topK: number, chunkTopK: number): RetrievalResult {
+function mapResult(d: any, technique: Technique, _topK: number, chunkTopK: number): RetrievalResult {
   const g = d?.graph ?? { nodes: [], edges: [] };
   const nodes: GraphNode[] = (g.nodes ?? []).map((n: any) => ({
     id: String(n.id),
@@ -147,36 +153,26 @@ function mapResult(d: any, technique: Technique, topK: number, chunkTopK: number
     size: 50,
   }));
   const edges = mapEdges(g.edges);
-  const chunks: Chunk[] = (d?.results ?? []).slice(0, chunkTopK).map((x: any) => ({
+  const chunks: Chunk[] = (d?.results ?? []).slice(0, chunkTopK).map((x: any, i: number) => ({
     id: String(x.chunk_id ?? x.id),
     title: String(x.label ?? x.id),
     source: technique,
-    score: Number(x.relevance_score ?? 0),
+    score: typeof x.relevance_score === "number" ? x.relevance_score : null,
+    rank: Number(x.rank ?? i + 1),
+    via: x.via ?? undefined,
     snippet: (x.description ? String(x.description).trim() : "") || undefined,
   }));
-  const keywords: string[] = d?.intent_analysis?.search_terms ?? [];
   const timeMs = Math.round(Number(d?.time_ms ?? 0));
-  const steps = buildSteps(technique, keywords, nodes.length, edges.length, chunks.length, topK, chunkTopK, timeMs);
+  // measured by the backend on this exact query (stage timings, real keywords and counts)
+  const steps: Step[] = (d?.steps ?? []).map((st: any) => ({
+    label: String(st.label), detail: String(st.detail ?? ""),
+    stat: st.stat ? String(st.stat) : undefined,
+    ms: typeof st.ms === "number" ? Math.round(st.ms) : undefined,
+  }));
   return {
     strategy: technique, timeMs, graph: { nodes, edges }, chunks, steps, answer: "", metrics: pendingMetrics(),
     note: d?.note ? String(d.note) : undefined,
   };
-}
-
-function buildSteps(
-  tech: Technique, keywords: string[], nE: number, nR: number, nC: number,
-  topK: number, chunkTopK: number, timeMs: number,
-): Step[] {
-  const kw: Step = { label: "Extract keywords", detail: keywords.join(", ") || "(none)", stat: `${keywords.length} kw` };
-  if (tech === "vector") {
-    return [kw, { label: "Vector chunks", detail: "cosine similarity over chunk embeddings", stat: `${nC} chunks @chunk_top_k ${chunkTopK}`, ms: timeMs }];
-  }
-  const steps: Step[] = [kw];
-  if (tech !== "global") steps.push({ label: "Entity search", detail: "match query entities, expand neighbourhood", stat: `${nE} entities @top_k ${topK}` });
-  if (tech !== "local") steps.push({ label: "Relation search", detail: "rank the strongest relationships", stat: `${nR} relations` });
-  if (tech === "mix") steps.push({ label: "Vector chunks", detail: "cosine similarity over chunk embeddings", stat: `${nC} chunks @chunk_top_k ${chunkTopK}` });
-  steps.push({ label: "Merge → final context", detail: "dedupe, truncate to token budget", stat: `${nE}E · ${nR}R · ${nC}C`, ms: timeMs });
-  return steps;
 }
 
 const RAGAS: [string, string, boolean][] = [

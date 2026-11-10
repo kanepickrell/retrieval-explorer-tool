@@ -62,9 +62,10 @@ async def unified_search(
     # vector is the main retrieval now; routing signals are advisory only
     strategy = (force_strategy or "vector").lower()
 
-    note, results, graph, lr_ms = None, [], None, None
+    note, results, graph, lr_ms, steps = None, [], None, None, []
     if strategy == "vector":
         results = run_vector(q, limit, sd)
+        steps = vector_provider.LAST_STEPS
         if not results:
             note = ("no vector results -- check the embed host "
                     f"({vector_provider.EMBED_HOST}) and corpus storage")
@@ -76,8 +77,9 @@ async def unified_search(
             results = await lightrag_provider.search(q, limit, mode=lr_mode, storage_dir=sd, top_k=top_k)
             graph = lightrag_provider.LAST_GRAPH  # subgraph for the retrieval graph UI
             lr_ms = lightrag_provider.LAST_QUERY_MS
+            steps = lightrag_provider.LAST_STEPS
             if not results:
-                note = ("no lightrag results -- check LLM/embed host and storage")
+                note = lightrag_provider.LAST_ERROR or "lightrag returned no context for this query"
         except Exception as e:
             note = f"lightrag unavailable: {e!r}"[:160]
     elif strategy in PARKED:
@@ -100,6 +102,7 @@ async def unified_search(
         "time_ms": lr_ms if lr_ms is not None else round((time.time() - t0) * 1000, 1),
         "note": note,
         "graph": graph,  # {nodes, edges} for lightrag strategies, else null
+        "steps": steps,  # measured pipeline stages: [{label, detail, stat, ms}]
         "results": results,
     }
 

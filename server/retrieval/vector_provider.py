@@ -87,15 +87,46 @@ def status() -> Dict:
             "dim": idx["dim"], "error": idx["error"]}
 
 
+def cosine_for(chunk_ids: List[str], query: str, storage_dir: str = None) -> Dict[str, float]:
+    """cosine(query, chunk) for the given chunk ids, using the same query
+    embedding as search(). Lets graph modes report a real relevance score that
+    is directly comparable with vector mode's. Missing ids are omitted."""
+    idx = _load_index(storage_dir)
+    if idx["error"] or not idx["mat"]:
+        return {}
+    qv = _embed_query(query)
+    if qv is None:
+        return {}
+    row = idx.setdefault("row_of", {cid: i for i, cid in enumerate(idx["ids"])})
+    out = {}
+    for cid in chunk_ids:
+        i = row.get(cid)
+        if i is not None:
+            out[cid] = round(float(sum(a * b for a, b in zip(qv, idx["mat"][i]))), 4)
+    return out
+
+
+# real pipeline steps of the last search(): [{label, detail, stat, ms}]
+LAST_STEPS: List[Dict] = []
+
+
 def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
     """Return top-k corpus hits as unified rows, deduped to best chunk per title
     (doc-level, which is what recall@k is scored against)."""
+    global LAST_STEPS
+    import time
+    LAST_STEPS = []
+    t = time.perf_counter()
     idx = _load_index(storage_dir)
+    load_ms = round((time.perf_counter() - t) * 1000, 1)
     if idx["error"] or not idx["mat"]:
         return []
+    t = time.perf_counter()
     qv = _embed_query(query)
+    embed_ms = round((time.perf_counter() - t) * 1000, 1)
     if qv is None:
         return []
+    t = time.perf_counter()
     mat, titles, contents, ids = idx["mat"], idx["titles"], idx["contents"], idx["ids"]
     # rows are normalized and qv is normalized -> cosine == dot
     best: Dict[str, Dict] = {}
@@ -110,8 +141,18 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
                            "description": (contents[i] or "")[:200],
                            "relevance_score": round(float(dot), 4),
                            "source": "vector", "chunk_id": ids[i]}
-    out = sorted(best.values(), key=lambda r: r["relevance_score"], reverse=True)
-    return out[:limit]
+    out = sorted(best.values(), key=lambda r: r["relevance_score"], reverse=True)[:limit]
+    score_ms = round((time.perf_counter() - t) * 1000, 1)
+    for rank, r in enumerate(out, 1):
+        r["rank"], r["via"] = rank, "C"
+    LAST_STEPS = ([{"label": "Load chunk index", "detail": "first query on this dataset decodes vdb_chunks.json",
+                    "stat": f"{len(ids)} chunks", "ms": load_ms}] if load_ms > 5 else []) + [
+        {"label": "Embed query", "detail": f"{EMBED_MODEL} via Ollama, 'search_query:' prefix",
+         "stat": f"{idx['dim']}d", "ms": embed_ms},
+        {"label": "Cosine search", "detail": "score every chunk, keep the best chunk per document",
+         "stat": f"{len(ids)} chunks → {len(best)} docs → top {len(out)}", "ms": score_ms},
+    ]
+    return out
 
 
 def contents_for(titles: List[str], char_cap: int = 1800, storage_dir: str = None) -> List[str]:

@@ -1,5 +1,7 @@
 import clsx from "clsx";
 import type { Chunk } from "@/lib/api";
+
+const VIA: Record<string, string> = { E: "via entity", R: "via relation", C: "vector match" };
 import { SOURCE_COLOR } from "@/lib/signals";
 
 type Props = { chunks: Chunk[]; activeId: string | null; onSelect: (c: Chunk | null) => void };
@@ -22,11 +24,12 @@ export default function ContextPanel({ chunks, activeId, onSelect }: Props) {
                 {c.snippet && <div className={clsx("text-xs text-muted", !active && "line-clamp-1")}>{c.snippet}</div>}
                 <span className="mt-1 inline-block rounded px-1.5 font-mono text-[10px]"
                   style={{ color, border: `1px solid color-mix(in srgb, ${color} 45%, transparent)` }}>{c.source}</span>
+                {c.via && <span className="ml-1.5 font-mono text-[10px] text-muted">{VIA[c.via] ?? c.via}</span>}
               </div>
-              <div className="flex w-12 flex-col items-end gap-1">
-                <span className="font-mono text-xs tabular">{c.score.toFixed(2)}</span>
+              <div className="flex w-12 flex-col items-end gap-1" title="cosine similarity between the query and this chunk (same embeddings for every technique)">
+                <span className="font-mono text-xs tabular">{c.score == null ? "—" : c.score.toFixed(2)}</span>
                 <span className="h-[3px] w-full rounded-full bg-line">
-                  <span className="block h-full rounded-full" style={{ width: `${c.score * 100}%`, background: color }} />
+                  {c.score != null && <span className="block h-full rounded-full" style={{ width: `${Math.max(0, c.score) * 100}%`, background: color }} />}
                 </span>
               </div>
             </button>
