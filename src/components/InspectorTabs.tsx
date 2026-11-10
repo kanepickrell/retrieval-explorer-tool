@@ -1,6 +1,6 @@
 import * as Tabs from "@radix-ui/react-tabs";
 import { Loader2 } from "lucide-react";
-import type { Chunk, Metric, RetrievalResult } from "@/lib/api";
+import { TECHNIQUE_LABEL, type Chunk, type Metric, type RetrievalResult } from "@/lib/api";
 import StepsPanel from "./StepsPanel";
 import ContextPanel from "./ContextPanel";
 import AnswerPanel from "./AnswerPanel";
@@ -32,7 +32,7 @@ function Summary({ r, loading }: { r: RetrievalResult; loading: boolean }) {
   return (
     <div className="flex items-center gap-2 font-mono text-[11px] text-muted">
       {loading && <Loader2 size={12} className="animate-spin text-local" />}
-      <span className="rounded border border-line px-1.5 text-ink">{r.strategy}</span>
+      <span className="rounded border border-line px-1.5 text-ink">{TECHNIQUE_LABEL[r.strategy] ?? r.strategy}</span>
       <span className="tabular" title="retrieval latency">{(r.timeMs / 1000).toFixed(2)} s</span>
       {r.keywordsCached !== null && (
         <span className={r.keywordsCached ? "text-good" : "text-muted"}

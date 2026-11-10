@@ -33,6 +33,8 @@ export function deriveSignals(r: RetrievalResult | null): Signals | null {
 
 export const SOURCE_COLOR: Record<string, string> = {
   vector: "var(--vector)",
+  bm25: "var(--lexical)",
+  bm25_vector: "var(--lexical)",
   local: "var(--local)",
   graph: "var(--local)",
   global: "var(--global)",

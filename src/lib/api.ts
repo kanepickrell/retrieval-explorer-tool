@@ -18,16 +18,17 @@
 
 // ───────────────────────── Types (the contract) ─────────────────────────
 
-export type Technique = "vector" | "local" | "global" | "hybrid" | "mix";
+export type Technique = "vector" | "bm25" | "bm25_vector" | "local" | "global" | "hybrid" | "mix";
 export type GraphNode = { id: string; label: string; cluster: string; type: string; size: number; description?: string };
 export type GraphEdge = { id: string; source: string; target: string; weight: number; label?: string };
 export type Step = { label: string; detail: string; stat?: string; ms?: number };
 /** One retrieved document (its best/first chunk). score = cosine(query, chunk) with the
  *  same embeddings for every technique (null if the chunk has no embedding); `via` is how
- *  LightRAG reached it: E = entity, R = relation, C = vector search. */
+ *  it was reached: E = entity, R = relation (LightRAG), C = vector search, B = BM25
+ *  keyword match, B+C = found by both BM25 and vector (fusion). */
 export type Chunk = {
   id: string; title: string; source: string; score: number | null; rank: number;
-  via?: "E" | "R" | "C"; snippet?: string; entities?: string[];
+  via?: "E" | "R" | "C" | "B" | "B+C"; snippet?: string; entities?: string[];
 };
 export type Metric = { key: string; label: string; value: number; referenceBased: boolean; pending?: boolean };
 export type RetrievalResult = {
@@ -59,7 +60,12 @@ export type Dataset = {
 };
 export type DocumentSummary = { id: string; title: string; chunks: number; entities: string[] };
 
-export const TECHNIQUES: Technique[] = ["vector", "local", "global", "hybrid", "mix"];
+export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "local", "global", "hybrid", "mix"];
+/** display names (ids are URL-safe) */
+export const TECHNIQUE_LABEL: Record<Technique, string> = {
+  vector: "vector", bm25: "bm25", bm25_vector: "bm25+vector",
+  local: "local", global: "global", hybrid: "hybrid", mix: "mix",
+};
 
 export class ApiError extends Error {}
 

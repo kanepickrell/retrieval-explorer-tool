@@ -1,7 +1,9 @@
 import clsx from "clsx";
 import type { Chunk } from "@/lib/api";
 
-const VIA: Record<string, string> = { E: "via entity", R: "via relation", C: "vector match" };
+const VIA: Record<string, string> = {
+  E: "via entity", R: "via relation", C: "vector match", B: "keyword match", "B+C": "keyword + vector",
+};
 import { SOURCE_COLOR } from "@/lib/signals";
 
 type Props = { chunks: Chunk[]; activeId: string | null; onSelect: (c: Chunk | null) => void };

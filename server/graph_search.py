@@ -31,6 +31,7 @@ _gdb = None
 PARKED = {"keyword", "neural"}           # need GraphDB/SPARQL -- parked for now
 NOT_PORTED: set = set()                  # (lightrag now ported)
 LIGHTRAG_ALIASES = {"lightrag", "mix", "local", "global", "hybrid"}
+LEXICAL = {"bm25", "bm25_vector"}         # keyword retrieval, and keyword + vector fusion
 
 
 def init_graph_search(gdb=None):
@@ -52,7 +53,7 @@ async def unified_search(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(20, le=100),
     force_strategy: Optional[str] = Query(
-        None, description="vector | local | global | hybrid | mix"),
+        None, description="vector | bm25 | bm25_vector | local | global | hybrid | mix"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
     top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
     fresh_keywords: bool = Query(False, description="bypass the keyword cache (cold LLM extraction)"),
@@ -68,14 +69,21 @@ async def unified_search(
     note, results, graph, lr_ms, steps = None, [], None, None, []
     contexts, context_text, system_prompt = [], "", None
     keywords_cached = None  # None = not applicable (vector has no keyword step)
-    if strategy == "vector":
-        results = run_vector(q, limit, sd)
-        steps = vector_provider.LAST_STEPS
+    if strategy == "vector" or strategy in LEXICAL:
+        if strategy == "vector":
+            results = run_vector(q, limit, sd)
+            steps = vector_provider.LAST_STEPS
+        else:
+            from retrieval import bm25_provider
+            results = (bm25_provider.search(q, limit, sd) if strategy == "bm25"
+                       else bm25_provider.search_fused(q, limit, sd))
+            steps = bm25_provider.LAST_STEPS
         contexts = [r.pop("content", "") for r in results]
         # exactly the context naive RAG generates over
         context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
         if not results:
-            note = ("no vector results -- check the embed host "
+            note = ("no keyword matches for this query" if strategy == "bm25" else
+                    "no vector results -- check the embed host "
                     f"({vector_provider.EMBED_HOST}) and corpus storage")
     elif strategy in LIGHTRAG_ALIASES:
         # lazy import so a missing LightRAG install never breaks the vector path
@@ -100,8 +108,15 @@ async def unified_search(
     else:
         note = f"unknown strategy '{strategy}', use vector"
 
-    # retrieval time only: for LightRAG modes this excludes waiting behind other queries
-    retrieval_ms = lr_ms if lr_ms is not None else round((time.time() - t0) * 1000, 1)
+    # retrieval time only. LightRAG: timed inside its query lock (excludes queue wait).
+    # vector/bm25/fusion: the sum of their measured steps, which excludes the extra
+    # query embedding used only for the cross-technique display score (cosine).
+    if lr_ms is not None:
+        retrieval_ms = lr_ms
+    elif steps:
+        retrieval_ms = round(sum(st.get("ms") or 0 for st in steps), 1)
+    else:
+        retrieval_ms = round((time.time() - t0) * 1000, 1)
     run = RUNS.new_run(dataset=ds.id, query=q, strategy=strategy, limit=limit, top_k=top_k,
                        retrieved_ids=[r["id"] for r in results], contexts=contexts,
                        context_text=context_text, system_prompt=system_prompt,
@@ -110,7 +125,7 @@ async def unified_search(
         "run_id": run.id,
         "query": q,
         "dataset": ds.id,
-        "strategy_used": strategy if (results or strategy == "vector") else "none",
+        "strategy_used": strategy if (results or strategy == "vector" or strategy in LEXICAL) else "none",
         "intent_analysis": {
             "recommended_strategy": intent.strategy.value,
             "confidence": intent.confidence,

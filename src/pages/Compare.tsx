@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Trophy } from "lucide-react";
 import clsx from "clsx";
-import { evaluate, runRetrieval, TECHNIQUES, type Metric, type RetrievalResult, type Technique } from "@/lib/api";
+import { evaluate, runRetrieval, TECHNIQUE_LABEL, TECHNIQUES, type Metric, type RetrievalResult, type Technique } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
 import { useHotkeys } from "@/lib/hotkeys";
 import { LOWER_IS_BETTER, overallScore, scoredMetrics } from "@/lib/score";
@@ -142,7 +142,7 @@ export default function Compare() {
 
       {!query ? (
         <section className="card py-12 text-center">
-          <p className="text-sm text-muted">Ask a question to run it through all five techniques at once.</p>
+          <p className="text-sm text-muted">Ask a question to run it through all {TECHNIQUES.length} techniques at once.</p>
           <p className="mt-1 text-xs text-muted/70">top_k {topK} · chunk_top_k {chunkTopK} — set in the Explorer's mode card</p>
         </section>
       ) : (
@@ -205,9 +205,9 @@ export default function Compare() {
                     const s = scores?.[t];
                     return (
                       <th key={t} className={clsx("px-3 py-3 text-left font-normal", t === winner && "bg-good/[0.06]")}>
-                        <button onClick={() => open(t)} title={`Open ${t} in the Explorer`} className="group w-full text-left">
+                        <button onClick={() => open(t)} title={`Open ${TECHNIQUE_LABEL[t]} in the Explorer`} className="group w-full text-left">
                           <span className="flex items-center gap-1.5 font-mono text-sm text-ink group-hover:text-local">
-                            {t}{t === winner && <Trophy size={12} className="text-good" />}
+                            {TECHNIQUE_LABEL[t]}{t === winner && <Trophy size={12} className="text-good" />}
                           </span>
                           <span className="mt-1 flex items-center gap-2">
                             <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-line">

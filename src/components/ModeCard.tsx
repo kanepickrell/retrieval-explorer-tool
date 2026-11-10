@@ -2,10 +2,12 @@ import * as Slider from "@radix-ui/react-slider";
 import clsx from "clsx";
 import { Link } from "react-router-dom";
 import { BarChart3 } from "lucide-react";
-import { TECHNIQUES, type Technique } from "@/lib/api";
+import { TECHNIQUE_LABEL, TECHNIQUES, type Technique } from "@/lib/api";
 
 const HINTS: Record<Technique, string> = {
   vector: "Plain dense retrieval over chunk embeddings — no graph.",
+  bm25: "Keyword search (Okapi BM25): exact terms, IDs and file names. No LLM, no embeddings.",
+  bm25_vector: "BM25 and vector rankings merged by reciprocal rank fusion — lexical + semantic.",
   local: "Entity-centric: match entities, then pull their neighbourhood.",
   global: "Relation-centric: rank the strongest relationships for the query.",
   hybrid: "Local entities plus global relations, merged.",
@@ -44,12 +46,12 @@ export default function ModeCard(p: Props) {
           <BarChart3 size={12} />compare all
         </Link>
       </div>
-      <div role="radiogroup" className="grid grid-cols-5 rounded-md border border-line bg-bg p-0.5">
+      <div role="radiogroup" className="flex flex-wrap gap-0.5 rounded-md border border-line bg-bg p-0.5">
         {TECHNIQUES.map((t, i) => (
-          <button key={t} role="radio" aria-checked={p.technique === t} onClick={() => p.onTechnique(t)} title={`${t} (press ${i + 1})`}
-            className={clsx("rounded px-2 py-1.5 font-mono text-xs transition-colors",
+          <button key={t} role="radio" aria-checked={p.technique === t} onClick={() => p.onTechnique(t)} title={`${TECHNIQUE_LABEL[t]} (press ${i + 1})`}
+            className={clsx("flex-1 whitespace-nowrap rounded px-2 py-1.5 font-mono text-xs transition-colors",
               p.technique === t ? "bg-surface-2 text-ink shadow-[inset_0_0_0_1px_var(--line)]" : "text-muted hover:text-ink")}>
-            {t}
+            {TECHNIQUE_LABEL[t]}
           </button>
         ))}
       </div>
