@@ -53,6 +53,17 @@ LAST_GRAPH: Dict[str, list] = {"nodes": [], "edges": []}
 LAST_STEPS: List[Dict] = []
 # error from the last query, if LightRAG raised (surfaced instead of "0 results")
 LAST_ERROR: Optional[str] = None
+# Keyword cache: LightRAG's keyword extraction is one LLM call per query and
+# ~95% of graph-mode latency. Keywords depend only on the query text and the LLM
+# (not the corpus or mode), so they are reused across modes, datasets and repeat
+# runs. Every run records whether its keywords were cached, so cold and cached
+# latencies are never mixed silently.
+_KW_CACHE: Dict[tuple, tuple] = {}   # (llm, normalized query) -> (hl, ll)
+LAST_KEYWORDS_CACHED: bool = False
+
+
+def _kw_key(query: str) -> tuple:
+    return (LLM, " ".join(query.split()).lower())
 # the answer prompt LightRAG built for the last query (system prompt incl. the full
 # KG + chunk context), and the chunk texts in that context -- stored on the run so
 # the answer is generated over exactly what retrieval returned
@@ -178,7 +189,7 @@ def _build_steps(mode: str, top_k: int, chunk_top_k: int, total_ms: float) -> Li
         if s in by_src:
             by_src[s] += 1
     steps = [
-        {"label": "Extract keywords (LLM)",
+        {"label": "Keywords (cached)" if LAST_KEYWORDS_CACHED else "Extract keywords (LLM)",
          "detail": f"high-level: {', '.join(hl) or '(none)'} · low-level: {', '.join(ll) or '(none)'}",
          "stat": f"{len(hl)} hl · {len(ll)} ll", "ms": ms.get("get_keywords_from_query")},
         {"label": "Search graph" + (" + vectors" if mode == "mix" else ""),
@@ -239,7 +250,8 @@ def status() -> Dict:
 
 
 async def search(query: str, limit: int = 20, mode: str = None,
-                 storage_dir: str = None, top_k: int = None) -> List[Dict]:
+                 storage_dir: str = None, top_k: int = None,
+                 fresh_keywords: bool = False) -> List[Dict]:
     """Run LightRAG retrieval and return the selected doc titles as unified rows,
     deduped preserving LightRAG's order (rank = order).
 
@@ -254,7 +266,7 @@ async def search(query: str, limit: int = 20, mode: str = None,
     async with _QUERY_LOCK:
         t0 = time.perf_counter()  # timed inside the lock: excludes queue wait behind other queries
         try:
-            rows = await _search_locked(rag, query, limit, mode, top_k)
+            rows = await _search_locked(rag, query, limit, mode, top_k, fresh_keywords)
         finally:
             LAST_QUERY_MS = round((time.perf_counter() - t0) * 1000, 1)
         LAST_STEPS = _build_steps(mode, top_k, limit, LAST_QUERY_MS)
@@ -268,8 +280,8 @@ async def search(query: str, limit: int = 20, mode: str = None,
     return rows
 
 
-async def _search_locked(rag, query, limit, mode, top_k) -> List[Dict]:
-    global LAST_GRAPH, LAST_PROMPT, LAST_CONTEXT_CHUNKS, LAST_ERROR
+async def _search_locked(rag, query, limit, mode, top_k, fresh_keywords=False) -> List[Dict]:
+    global LAST_GRAPH, LAST_PROMPT, LAST_CONTEXT_CHUNKS, LAST_ERROR, LAST_KEYWORDS_CACHED
     _CUR["ctx"], _CUR["ents"], _CUR["rels"], _CUR["chunks"] = [], [], [], []
     _TRACE.clear()
     LAST_GRAPH = {"nodes": [], "edges": []}
@@ -278,10 +290,17 @@ async def _search_locked(rag, query, limit, mode, top_k) -> List[Dict]:
     try:
         # only_need_prompt: build the context AND LightRAG's full answer prompt,
         # without calling the LLM -- same cost as only_need_context
+        cached = None if fresh_keywords else _KW_CACHE.get(_kw_key(query))
+        LAST_KEYWORDS_CACHED = cached is not None
+        # passing hl/ll keywords makes LightRAG skip its extraction LLM call
         ans = await rag.aquery(query, param=QueryParam(
             mode=mode, top_k=top_k, chunk_top_k=limit,
             max_total_tokens=12000, enable_rerank=False,
-            only_need_prompt=True))
+            only_need_prompt=True,
+            hl_keywords=list(cached[0]) if cached else [],
+            ll_keywords=list(cached[1]) if cached else []))
+        if not cached and (_TRACE.get("hl") or _TRACE.get("ll")):
+            _KW_CACHE[_kw_key(query)] = (tuple(_TRACE.get("hl", [])), tuple(_TRACE.get("ll", [])))
         prompt = ans if isinstance(ans, str) else getattr(ans, "content", None)
         if prompt:
             # kg_query renders "<system prompt>\n\n---User Query---\n\n<query>"

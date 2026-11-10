@@ -21,6 +21,8 @@ type Row = {
   ranked: boolean;
   /** draw a 0–1 bar under the value */
   bar?: boolean;
+  /** small annotation under the value (e.g. whether keywords were cached) */
+  note?: (r: RetrievalResult) => string | undefined;
 };
 
 const metricRow = (key: string, label: string): Row => ({
@@ -36,7 +38,11 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
   {
     title: "Cost & footprint",
     rows: [
-      { key: "latency", label: "Latency", ranked: true, get: (r) => r.timeMs, fmt: (v) => `${v} ms` },
+      // ranked on the search itself: keyword extraction is shared/cached across modes, so
+      // whichever mode ran first would otherwise look slowest
+      { key: "latency", label: "Search latency", ranked: true, get: (r) => r.timeMs - (r.keywordMs ?? 0), fmt: (v) => `${v} ms` },
+      { key: "keyword_ms", label: "Keyword extraction", ranked: false, get: (r) => r.keywordMs, fmt: (v) => `${v} ms`,
+        note: (r) => (r.keywordsCached === null ? undefined : r.keywordsCached ? "cached" : "cold LLM") },
       { key: "entities", label: "Entities", ranked: false, get: (r) => r.graph.nodes.length, fmt: String },
       { key: "relations", label: "Relations", ranked: false, get: (r) => r.graph.edges.length, fmt: String },
       { key: "chunks", label: "Chunks", ranked: false, get: (r) => r.chunks.length, fmt: String },
@@ -165,7 +171,7 @@ export default function Compare() {
               <p className="w-full text-xs text-muted/80">
                 Overall = mean of the {labeled ? "reference-free and reference-based" : "reference-free"} metrics
                 (noise sensitivity inverted){labeled ? "" : " — this dataset has no gold labels, so recall metrics are left out"}.
-                Latency is shown but not scored.
+                Search latency (excluding keyword extraction, which is shared and cached across modes) is ranked but not scored.
               </p>
             </section>
           )}
@@ -266,6 +272,9 @@ function MetricRow({ row, runs, hidden, winner }: { row: Row; runs: Runs; hidden
             ) : (
               <div className="flex items-center gap-2">
                 <span className={clsx("w-14 font-mono text-xs tabular", isBest ? "font-semibold text-good" : "text-ink")}>{row.fmt(v)}</span>
+                {row.note && runs[t] && row.note(runs[t]!) && (
+                  <span className="font-mono text-[10px] text-muted">{row.note(runs[t]!)}</span>
+                )}
                 {row.bar && (
                   <span className="h-[3px] flex-1 overflow-hidden rounded-full bg-line">
                     <span className={clsx("block h-full rounded-full", isBest ? "bg-good" : "bg-ink/35")} style={{ width: `${v * 100}%` }} />

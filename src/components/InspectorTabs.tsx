@@ -33,7 +33,14 @@ function Summary({ r, loading }: { r: RetrievalResult; loading: boolean }) {
     <div className="flex items-center gap-2 font-mono text-[11px] text-muted">
       {loading && <Loader2 size={12} className="animate-spin text-local" />}
       <span className="rounded border border-line px-1.5 text-ink">{r.strategy}</span>
-      <span className="tabular" title="end-to-end latency">{(r.timeMs / 1000).toFixed(2)} s</span>
+      <span className="tabular" title="retrieval latency">{(r.timeMs / 1000).toFixed(2)} s</span>
+      {r.keywordsCached !== null && (
+        <span className={r.keywordsCached ? "text-good" : "text-muted"}
+          title={r.keywordsCached ? "keywords reused from an earlier run of this query: no LLM call, so this latency is not cold"
+                                  : "keywords extracted by the LLM on this run (cold)"}>
+          {r.keywordsCached ? "kw cached" : "kw cold"}
+        </span>
+      )}
       <span className="hidden tabular sm:inline" title="entities · relations · chunks">
         {r.graph.nodes.length}E · {r.graph.edges.length}R · {r.chunks.length}C
       </span>

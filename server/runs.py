@@ -34,6 +34,7 @@ class Run:
     context_text: str                 # everything the generator sees (KG + chunks for LightRAG)
     system_prompt: Optional[str]      # LightRAG's exact answer prompt; None for vector
     retrieval_ms: float
+    keywords_cached: Optional[bool] = None   # None for vector (no keyword step)
     created_at: float = field(default_factory=time.time)
     answer: Optional[str] = None
     answer_ms: Optional[float] = None

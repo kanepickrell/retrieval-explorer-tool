@@ -34,6 +34,11 @@ export type RetrievalResult = {
   /** backend run id: answer + metrics are computed on exactly this retrieval */
   runId: string;
   strategy: Technique; timeMs: number;
+  /** graph modes: true if keyword extraction was skipped (cache hit), false if it ran
+   *  (cold LLM call); null for vector, which has no keyword step */
+  keywordsCached: boolean | null;
+  /** time spent obtaining keywords (null for vector); timeMs - keywordMs = the search itself */
+  keywordMs: number | null;
   graph: { nodes: GraphNode[]; edges: GraphEdge[] }; // touched subgraph; empty for vector
   chunks: Chunk[]; steps: Step[]; answer: string; metrics: Metric[];
   note?: string;
@@ -173,6 +178,8 @@ function mapResult(d: any, technique: Technique, _topK: number, chunkTopK: numbe
   }));
   return {
     runId: String(d?.run_id ?? ""),
+    keywordsCached: typeof d?.keywords_cached === "boolean" ? d.keywords_cached : null,
+    keywordMs: typeof d?.keyword_ms === "number" ? Math.round(d.keyword_ms) : null,
     strategy: technique, timeMs, graph: { nodes, edges }, chunks, steps, answer: "", metrics: pendingMetrics(),
     note: d?.note ? String(d.note) : undefined,
   };

@@ -55,6 +55,7 @@ async def unified_search(
         None, description="vector | local | global | hybrid | mix"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
     top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
+    fresh_keywords: bool = Query(False, description="bypass the keyword cache (cold LLM extraction)"),
 ):
     """Retrieve under one strategy and store the result as a run. Returns run_id:
     /answer and /metrics take it, so they work on exactly this retrieval."""
@@ -66,6 +67,7 @@ async def unified_search(
 
     note, results, graph, lr_ms, steps = None, [], None, None, []
     contexts, context_text, system_prompt = [], "", None
+    keywords_cached = None  # None = not applicable (vector has no keyword step)
     if strategy == "vector":
         results = run_vector(q, limit, sd)
         steps = vector_provider.LAST_STEPS
@@ -80,7 +82,9 @@ async def unified_search(
         try:
             from retrieval import lightrag_provider
             lr_mode = "mix" if strategy == "lightrag" else strategy
-            results = await lightrag_provider.search(q, limit, mode=lr_mode, storage_dir=sd, top_k=top_k)
+            results = await lightrag_provider.search(q, limit, mode=lr_mode, storage_dir=sd, top_k=top_k,
+                                                     fresh_keywords=fresh_keywords)
+            keywords_cached = lightrag_provider.LAST_KEYWORDS_CACHED
             graph = lightrag_provider.LAST_GRAPH  # subgraph for the retrieval graph UI
             lr_ms = lightrag_provider.LAST_QUERY_MS
             steps = lightrag_provider.LAST_STEPS
@@ -101,7 +105,7 @@ async def unified_search(
     run = RUNS.new_run(dataset=ds.id, query=q, strategy=strategy, limit=limit, top_k=top_k,
                        retrieved_ids=[r["id"] for r in results], contexts=contexts,
                        context_text=context_text, system_prompt=system_prompt,
-                       retrieval_ms=retrieval_ms)
+                       retrieval_ms=retrieval_ms, keywords_cached=keywords_cached)
     return {
         "run_id": run.id,
         "query": q,
@@ -115,6 +119,11 @@ async def unified_search(
         },
         "total_results": len(results),
         "time_ms": retrieval_ms,
+        # true = keyword extraction was skipped (cached); compare latencies like with like
+        "keywords_cached": keywords_cached,
+        # time spent getting keywords (LLM call when cold, ~0 when cached); time_ms
+        # minus this is the retrieval itself, which is what differs between modes
+        "keyword_ms": next((s.get("ms") for s in steps if s.get("label", "").startswith(("Extract keywords", "Keywords"))), None),
         "note": note,
         "graph": graph,  # {nodes, edges} for lightrag strategies, else null
         "steps": steps,  # measured pipeline stages: [{label, detail, stat, ms}]
