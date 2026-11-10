@@ -5,10 +5,17 @@ nomic-embed-text (768d, search_document:/search_query: prefixes), gemma3:12b,
 500/50-token chunks. Point the backend at the result with
 PROTOGRAPH_CORPUS_STORAGE=<storage_dir>.
 
-Resumable: LightRAG tracks doc status, so re-running skips finished docs.
-LightRAG will NOT re-process a doc whose earlier attempt failed (it reports a
-filename duplicate), so --retry-failed deletes those failed records (and the
-duplicate records a plain retry leaves behind) before re-inserting the docs.
+Resumable by default: docs already processed are skipped; failed records (and
+the filename-duplicate records a plain retry leaves behind) are deleted and those
+docs re-inserted, because LightRAG will not re-process a failed doc on its own.
+--retry-failed limits the run to the failed docs.
+
+Windows hardening (both seen in practice):
+  - LightRAG saves each store by writing a temp file and os.replace()-ing it over
+    the old one; antivirus / the search indexer briefly holding the file makes
+    that raise "Access is denied". os.replace is retried with backoff.
+  - LLM / embedding calls that hit a dropped connection are retried with a fresh
+    HTTP session instead of failing the doc.
 Content duplicates (the same text under another id) are left alone: LightRAG
 indexes that text once under the original id.
 
@@ -33,13 +40,60 @@ from lightrag.utils import EmbeddingFunc  # noqa: E402
 
 from retrieval import lightrag_provider as lp  # noqa: E402  (reuse its Ollama funcs + settings)
 
+_os_replace = os.replace
+
+
+def _replace_with_retry(src, dst, *a, **k):
+    """os.replace, retried while Windows reports the target as locked (WinError 5/32)."""
+    for attempt in range(40):
+        try:
+            return _os_replace(src, dst, *a, **k)
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(min(0.05 * (attempt + 1), 1.0))
+
+
+os.replace = _replace_with_retry   # build process only; LightRAG's atomic writes go through it
+
+
+def _with_retry(fn, what: str, attempts: int = 4):
+    async def wrapped(*a, **k):
+        for i in range(attempts):
+            try:
+                return await fn(*a, **k)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, AttributeError) as e:
+                if i == attempts - 1:
+                    raise
+                print(f"[build] {what} failed ({e!r:.80}); retry {i + 1}/{attempts - 1}", flush=True)
+                try:
+                    await lp._SESSION.close()
+                except Exception:
+                    pass
+                lp._SESSION = aiohttp.ClientSession()
+                await asyncio.sleep(5 * (i + 1))
+    return wrapped
+
+
+_llm = _with_retry(lp._ollama_llm, "llm call")
+_embed = _with_retry(lp._ollama_embed, "embed call")
+
+
+def _status(storage_dir: str) -> dict:
+    import json
+    f = Path(storage_dir) / "kv_store_doc_status.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
 
 def _failed_doc_ids(storage_dir: str) -> tuple:
     """(failed real docs, leftover filename-duplicate records) from doc status."""
     import json
     f = Path(storage_dir) / "kv_store_doc_status.json"
     st = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-    failed = [k for k, v in st.items() if v.get("status") == "failed" and not k.startswith("dup-")]
+    # "processing"/"pending" left behind by a crashed run count as failed: LightRAG
+    # would otherwise treat a re-insert as a filename duplicate
+    failed = [k for k, v in st.items()
+              if v.get("status") in ("failed", "processing", "pending") and not k.startswith("dup-")]
     stale_dups = [k for k, v in st.items() if k.startswith("dup-") and v.get("status") == "failed"
                   and "File name already exists" in (v.get("error_msg") or "")]
     return failed, stale_dups
@@ -53,21 +107,24 @@ async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bo
     lp._SESSION = aiohttp.ClientSession()
     rag = LightRAG(
         working_dir=storage_dir,
-        llm_model_func=lp._ollama_llm, llm_model_name=lp.LLM,
+        llm_model_func=_llm, llm_model_name=lp.LLM,
         embedding_func=EmbeddingFunc(embedding_dim=768, max_token_size=2048,
-                                     func=lp._ollama_embed, model_name=lp.EMBED),
+                                     func=_embed, model_name=lp.EMBED),
         chunk_token_size=500, chunk_overlap_token_size=50,
         llm_model_max_async=max_async, enable_llm_cache=True,
     )
     await rag.initialize_storages()
+    failed, stale = _failed_doc_ids(storage_dir)
+    for doc_id in failed + stale:
+        r = await rag.adelete_by_doc_id(doc_id)
+        print(f"[build] deleted failed record {doc_id}: {getattr(r, 'status', r)}", flush=True)
+    done = {k for k, v in _status(storage_dir).items() if v.get("status") == "processed"}
     if retry_failed:
-        failed, stale = _failed_doc_ids(storage_dir)
-        for doc_id in failed + stale:
-            r = await rag.adelete_by_doc_id(doc_id)
-            print(f"[build] deleted failed record {doc_id}: {getattr(r, 'status', r)}", flush=True)
-        wanted = set(failed)
-        docs = [p for p in docs if p.stem in wanted]
-        print(f"[build] retrying {len(docs)} failed docs", flush=True)
+        docs = [p for p in docs if p.stem in set(failed)]
+    else:
+        docs = [p for p in docs if p.stem not in done]
+    print(f"[build] {len(done)} already processed; {len(docs)} to insert "
+          f"({len(failed)} of them retries)", flush=True)
     t0 = time.time()
     try:
         for i, p in enumerate(docs, 1):
