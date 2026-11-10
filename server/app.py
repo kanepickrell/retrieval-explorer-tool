@@ -104,6 +104,13 @@ def documents(dataset: str | None = Query(None)):
     return DS.documents(DS.get(dataset))
 
 
+@app.get("/documents/chunks")
+def document_chunks(doc: str = Query(..., description="document id (file name) from /documents"),
+                    dataset: str | None = Query(None)):
+    """One document's chunks in order, with the entities extracted from each."""
+    return DS.chunks_of(DS.get(dataset), doc)
+
+
 @app.get("/graph")
 def graph(dataset: str | None = Query(None)):
     return _load_corpus_graph(dataset)

@@ -58,7 +58,15 @@ export type Dataset = {
   /** short gold queries, offered as "try" chips */
   samples: string[];
 };
-export type DocumentSummary = { id: string; title: string; chunks: number; entities: string[] };
+export type GoldRef = { id: string; query: string; type: string };
+export type DocumentSummary = {
+  id: string; title: string; chunks: number; entities: string[];
+  /** browse hierarchy: category › subcategory › document › chunks */
+  category: string; subcategory: string;
+  /** gold eval queries whose answer should come from this doc */
+  gold: GoldRef[];
+};
+export type DocChunk = { id: string; order: number; tokens: number; content: string; entities: string[] };
 
 export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "local", "global", "hybrid", "mix"];
 /** display names (ids are URL-safe) */
@@ -127,6 +135,16 @@ export async function listDocuments(datasetId: string): Promise<DocumentSummary[
   const d = await getJson("/documents", { dataset: datasetId });
   return (d ?? []).map((x: any) => ({
     id: String(x.id), title: String(x.title), chunks: Number(x.chunks ?? 0), entities: (x.entities ?? []).map(String),
+    category: String(x.category ?? "Other"), subcategory: String(x.subcategory ?? "Other"),
+    gold: (x.gold ?? []).map((g: any) => ({ id: String(g.id), query: String(g.query), type: String(g.type ?? "") })),
+  }));
+}
+
+export async function listDocChunks(datasetId: string, docId: string): Promise<DocChunk[]> {
+  const d = await getJson("/documents/chunks", { dataset: datasetId, doc: docId });
+  return (d ?? []).map((c: any) => ({
+    id: String(c.id), order: Number(c.order ?? 0), tokens: Number(c.tokens ?? 0),
+    content: String(c.content ?? ""), entities: (c.entities ?? []).map(String),
   }));
 }
 

@@ -145,16 +145,81 @@ def list_all() -> List[dict]:
     return [describe(d) for d in _registry().values()]
 
 
+def _as_list(v) -> list:
+    """LightRAG kv fields are lists, or (in some stores) their string repr."""
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.startswith("["):
+        import ast
+        try:
+            return list(ast.literal_eval(v))
+        except Exception:
+            return []
+    return []
+
+
+_TAGS = re.compile(r"^Tags: (.+)$", re.M)
+
+
+def categorize(doc: str, content: str) -> tuple:
+    """(category, subcategory) for browsing, from the doc's file name and text."""
+    title = (content or "").lstrip().split("\n", 1)[0].lstrip("# ").strip()
+    if doc.startswith("chat-"):
+        m = re.match(r"Chat session chat-\d+: (.+)", title)       # synthetic corpus: topic in the title
+        if m:
+            return "Chats", m.group(1).strip()
+        tags = _TAGS.search(content or "")
+        first = tags.group(1).split(",")[0].strip() if tags else ""
+        return "Chats", (first.replace("_", " ") or "untagged")
+    if doc.startswith("file-user-guide"):
+        return "Files", "User guide"
+    if doc.startswith("file-"):
+        return "Files", "Uploaded files"
+    for prefix, sub in (("catalog-", "Catalogs"), ("agent-", "Agents"), ("tool-", "Tools"), ("step-", "Steps")):
+        if doc.startswith(prefix):
+            return "Agent Hub", sub
+    if doc.startswith("person-"):
+        return "People", "Pseudonymous users"
+    return "Other", "Other"
+
+
 def documents(ds: Dataset) -> List[dict]:
-    """Indexed documents with chunk + entity counts (entity names = graph node ids)."""
+    """Indexed documents with category, chunk + entity counts (entity names = graph
+    node ids) and the gold queries that point at each doc."""
     status = _read(ds.storage / "kv_store_doc_status.json") or {}
     ents = _read(ds.storage / "kv_store_full_entities.json") or {}
+    full = _read(ds.storage / "kv_store_full_docs.json") or {}
+    gold_by_doc: Dict[str, list] = {}
+    for g in gold_entries(ds):
+        for d in g.get("gold_ids", []):
+            gold_by_doc.setdefault(d, []).append({
+                "id": g.get("id"), "query": g.get("query", "")[:300],
+                "type": g.get("query_type", "")})
     out = []
     for doc_id, s in status.items():
         if not isinstance(s, dict) or s.get("status") != "processed":
             continue
-        names = (ents.get(doc_id) or {}).get("entity_names") or []
-        title = (s.get("content_summary") or "").split("\n", 1)[0].lstrip("# ").strip()
-        out.append({"id": s.get("file_path") or doc_id, "title": title or s.get("file_path") or doc_id,
-                    "chunks": int(s.get("chunks_count") or 0), "entities": list(names)})
-    return sorted(out, key=lambda d: d["id"])
+        names = _as_list((ents.get(doc_id) or {}).get("entity_names"))
+        fp = s.get("file_path") or doc_id
+        content = (full.get(doc_id) or {}).get("content") or s.get("content_summary") or ""
+        title = content.lstrip().split("\n", 1)[0].lstrip("# ").strip()
+        cat, sub = categorize(fp, content)
+        out.append({"id": fp, "title": title or fp, "category": cat, "subcategory": sub,
+                    "chunks": int(s.get("chunks_count") or 0), "entities": list(names),
+                    "gold": gold_by_doc.get(fp, [])})
+    return sorted(out, key=lambda d: (d["category"], d["subcategory"], d["title"].lower()))
+
+
+def chunks_of(ds: Dataset, doc: str) -> List[dict]:
+    """A document's chunks in order, with the entities extracted from each."""
+    chunks = _read(ds.storage / "kv_store_text_chunks.json") or {}
+    mine = {k: v for k, v in chunks.items() if isinstance(v, dict) and v.get("file_path") == doc}
+    ents = _read(ds.storage / "kv_store_entity_chunks.json") or {}
+    by_chunk: Dict[str, list] = {}
+    for name, v in ents.items():
+        for cid in _as_list((v or {}).get("chunk_ids")):
+            if cid in mine:
+                by_chunk.setdefault(cid, []).append(name)
+    return [{"id": k, "order": int(v.get("chunk_order_index") or 0), "tokens": int(v.get("tokens") or 0),
+             "content": v.get("content") or "", "entities": sorted(by_chunk.get(k, []))}
+            for k, v in sorted(mine.items(), key=lambda kv: int(kv[1].get("chunk_order_index") or 0))]
