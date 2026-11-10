@@ -6,7 +6,7 @@ import {
 import { select } from "d3-selection";
 import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from "d3-zoom";
 import "d3-transition";
-import { Crosshair, Maximize2, Shrink, Tag, X } from "lucide-react";
+import { Crosshair, Filter, Maximize2, Shrink, Tag, X } from "lucide-react";
 import clsx from "clsx";
 import type { GraphEdge, GraphNode } from "@/lib/api";
 import { clusterColor, type Signals } from "@/lib/signals";
@@ -33,6 +33,8 @@ type Props = {
 };
 
 const nodeRadius = (degree: number) => 6 + Math.min(8, degree * 0.8);
+/** cap on nodes laid out in result-only view (force layout + SVG cost grows with this) */
+const RESULT_VIEW_MAX = 400;
 
 function layoutOrbs(nodes: GraphNode[]): Orb[] {
   const counts = new Map<string, number>();
@@ -69,6 +71,9 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
   const [focusId, setFocusId] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [allLabels, setAllLabels] = useState(false);
+  // result-only view: after a search, lay out just the retrieved nodes + their nearest
+  // neighbours instead of every node in the dataset (thousands -> a few hundred)
+  const [resultOnly, setResultOnly] = useState(true);
 
   const detail = expanded.size > 0;
   const orbs = useMemo(() => layoutOrbs(graph.nodes), [graph.nodes]);
@@ -140,11 +145,35 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
   // reset when the dataset graph changes
   useEffect(() => { setExpanded(new Set()); setFocusId(null); posRef.current.clear(); }, [graph]);
 
-  // ── detail-view force simulation over members of expanded clusters ──
+  const retrievedIds = useMemo(() => {
+    if (!signals) return [] as string[];
+    return [...new Set([...signals.entity, ...signals.vector, ...signals.context])];
+  }, [signals]);
+
+  /** Nodes drawn in result-only view: retrieved + focused/highlighted nodes, plus the
+   *  neighbours that connect the most of them (then highest degree), up to RESULT_VIEW_MAX.
+   *  null = no scoping (browse by clusters). */
+  const scopeIds = useMemo<Set<string> | null>(() => {
+    const core = new Set<string>([...retrievedIds, ...(highlight?.ids ?? [])].filter((id) => nodeBy.has(id)));
+    if (focusId && nodeBy.has(focusId)) core.add(focusId);
+    if (!resultOnly || core.size === 0) return null;
+    const out = new Set(core);
+    if (focusId) for (const n of neighbours.get(focusId) ?? []) out.add(n);
+    const links = new Map<string, number>();
+    for (const id of core) for (const n of neighbours.get(id) ?? []) if (!out.has(n)) links.set(n, (links.get(n) ?? 0) + 1);
+    const ranked = [...links.entries()].sort((a, b) => b[1] - a[1] || (degree.get(b[0]) ?? 0) - (degree.get(a[0]) ?? 0));
+    for (const [id] of ranked) { if (out.size >= RESULT_VIEW_MAX) break; out.add(id); }
+    return out;
+  }, [resultOnly, retrievedIds, highlight, focusId, neighbours, degree, nodeBy]);
+  const scopeKey = scopeIds ? [...scopeIds].sort().join("|") : "";
+
+  // ── detail-view force simulation: the scoped result view, or members of expanded clusters ──
   const expandedKey = [...expanded].sort().join("|");
   useEffect(() => {
     simRef.current?.stop();
-    const visible = graph.nodes.filter((n) => expanded.has(n.cluster));
+    const visible = scopeIds
+      ? graph.nodes.filter((n) => scopeIds.has(n.id))
+      : graph.nodes.filter((n) => expanded.has(n.cluster));
     const ids = new Set(visible.map((n) => n.id));
     const nodes: SimNode[] = visible.map((n) => {
       const prev = posRef.current.get(n.id);
@@ -171,19 +200,18 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
       sim.stop();
       for (const n of nodes) posRef.current.set(n.id, { x: n.x ?? 0, y: n.y ?? 0 });
     };
-  }, [expandedKey, graph, orbBy, degree]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [expandedKey, scopeKey, graph, orbBy, degree]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── a new retrieval drops into detail view and (optionally) follows it ──
   useEffect(() => {
     if (!resultKey) return;
     setFocusId(null);
-    setExpanded(new Set(orbs.map((o) => o.cluster)));
+    if (!resultOnly) { setExpanded(new Set(orbs.map((o) => o.cluster))); return; }
+    // result-only: open just the clusters the result touches; a result with no graph
+    // nodes (vector / bm25) stays in the cluster overview instead of laying out everything
+    const touched = new Set(retrievedIds.map((id) => nodeBy.get(id)?.cluster).filter(Boolean) as string[]);
+    setExpanded(touched);
   }, [resultKey]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const retrievedIds = useMemo(() => {
-    if (!signals) return [] as string[];
-    return [...new Set([...signals.entity, ...signals.vector, ...signals.context])];
-  }, [signals]);
 
   useEffect(() => {
     if (!resultKey || !follow) return;
@@ -281,7 +309,9 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
         <div className="mr-auto flex items-baseline gap-2">
           <h2 className="font-title text-sm font-semibold">Knowledge graph</h2>
-          <span className="font-mono text-[11px] text-muted">{graph.nodes.length} nodes · {graph.edges.length} edges</span>
+          <span className="font-mono text-[11px] text-muted">
+            {scopeIds ? `showing ${visibleNodes.length} of ${graph.nodes.length} nodes` : `${graph.nodes.length} nodes · ${graph.edges.length} edges`}
+          </span>
         </div>
         <NodeSearch nodes={graph.nodes} focusId={focusId} onFocus={focusNode} />
         <div className="flex items-center rounded-md border border-line bg-bg p-0.5">
@@ -289,6 +319,8 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
             title="Follow: auto-zoom to each new result" />
           <ToolToggle on={allLabels} onClick={() => setAllLabels((f) => !f)} icon={<Tag size={13} />} label="labels"
             title="Label every node that fits (l)" />
+          <ToolToggle on={resultOnly} onClick={() => setResultOnly((v) => !v)} icon={<Filter size={13} />} label="result only"
+            title={`Result only: draw just the retrieved nodes and their nearest neighbours (up to ${RESULT_VIEW_MAX}); off = full graph`} />
           <span className="mx-0.5 h-4 w-px bg-line" />
           <ToolButton onClick={() => fitVisible()} title="Fit to view (f)"><Maximize2 size={13} /></ToolButton>
           <ToolButton onClick={collapseAll} disabled={!detail} title="Collapse all regions (c)"><Shrink size={13} /></ToolButton>
