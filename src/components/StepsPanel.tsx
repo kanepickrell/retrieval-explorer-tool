@@ -32,8 +32,8 @@ export default function StepsPanel({ steps, totalMs }: { steps: Step[]; totalMs:
         })}
       </ol>
       <p className="flex justify-between px-1 pt-1 font-mono text-[11px] text-muted">
-        <span>retrieval {retrievalMs} ms</span>
-        <span>+ generation {Math.max(0, totalMs - retrievalMs)} ms = <span className="text-ink">{totalMs} ms</span></span>
+        <span>retrieval <span className="text-ink">{totalMs} ms</span></span>
+        <span className="text-muted/70">answer generated on demand →</span>
       </p>
     </div>
   );

@@ -21,7 +21,7 @@ export type GraphNode = { id: string; label: string; cluster: string; type: stri
 export type GraphEdge = { id: string; source: string; target: string; weight: number; label?: string };
 export type Step = { label: string; detail: string; stat?: string; ms?: number };
 export type Chunk = { id: string; title: string; source: string; score: number; snippet?: string; entities?: string[] };
-export type Metric = { key: string; label: string; value: number; referenceBased: boolean };
+export type Metric = { key: string; label: string; value: number; referenceBased: boolean; pending?: boolean };
 export type RetrievalResult = {
   strategy: Technique; timeMs: number;
   graph: { nodes: GraphNode[]; edges: GraphEdge[] }; // touched subgraph; empty for vector
@@ -32,11 +32,50 @@ export type DocumentSummary = { id: string; title: string; chunks: number; entit
 
 export const TECHNIQUES: Technique[] = ["vector", "local", "global", "hybrid", "mix"];
 
+// ───────────────────────── Backend seam ─────────────────────────
+// The two network functions below hit the ProtoGraph corpus backend
+// (server/app.py). Everything else (datasets, documents, the mock world) is
+// still local and acts as an offline fallback when the backend is unreachable.
+//   getGraph      -> GET  /graph                         (corpus knowledge graph)
+//   runRetrieval  -> GET  /api/search/unified?q&limit&force_strategy
+// Set VITE_API_URL to point at the backend (defaults to localhost:8000).
+
+const API_BASE = ((import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+
+/** Undirected, deterministic edge id so a retrieval subgraph's edges match the
+ *  full graph's edges (GraphCanvas highlights relations by edge id). */
+const pairKey = (a: string, b: string) => (a < b ? `${a}|||${b}` : `${b}|||${a}`);
+
 // ───────────────────────── Public API ─────────────────────────
 
 export async function getGraph(datasetId: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
-  await sleep(120);
-  return graphFor(datasetId);
+  try {
+    const r = await fetch(`${API_BASE}/graph`);
+    if (!r.ok) throw new Error(`/graph ${r.status}`);
+    const d = await r.json();
+    const nodes: GraphNode[] = (d.nodes ?? []).map((n: any) => ({
+      id: String(n.id),
+      label: String(n.label ?? n.id),
+      cluster: String(n.cluster ?? n.type ?? "unknown").toLowerCase(),
+      type: String(n.type ?? n.cluster ?? "unknown"),
+      size: Number(n.size ?? 50),
+      description: n.description ? String(n.description) : undefined,
+    }));
+    const seen = new Set<string>();
+    const edges: GraphEdge[] = [];
+    for (const e of d.edges ?? []) {
+      const s = String(e.source), t = String(e.target);
+      const id = pairKey(s, t);
+      if (seen.has(id)) continue; // dedupe parallel/undirected edges -> unique, matchable ids
+      seen.add(id);
+      edges.push({ id, source: s, target: t, weight: Number(e.weight ?? 1), label: e.label ? String(e.label) : undefined });
+    }
+    return { nodes, edges };
+  } catch (err) {
+    console.warn("[api] getGraph: backend unreachable, using mock —", err);
+    await sleep(80);
+    return graphFor(datasetId);
+  }
 }
 
 export async function runRetrieval(
@@ -46,9 +85,133 @@ export async function runRetrieval(
   topK: number,
   chunkTopK: number,
 ): Promise<RetrievalResult> {
-  const result = mockRetrieve(datasetId, query, technique, topK, chunkTopK);
-  await sleep(Math.min(900, 220 + result.timeMs / 4));
-  return result;
+  try {
+    const limit = Math.max(topK, chunkTopK, 5);
+    const url = `${API_BASE}/api/search/unified?q=${encodeURIComponent(query)}&limit=${limit}&force_strategy=${technique}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`/api/search/unified ${r.status}`);
+    return mapResult(await r.json(), technique, topK, chunkTopK);
+  } catch (err) {
+    console.warn("[api] runRetrieval: backend unreachable, using mock —", err);
+    const result = mockRetrieve(datasetId, query, technique, topK, chunkTopK);
+    await sleep(Math.min(900, 220 + result.timeMs / 4));
+    return result;
+  }
+}
+
+/** Map the backend's unified-search response onto RetrievalResult.
+ *  The graph, chunks and counts are real; steps are derived from the real
+ *  counts + extracted keywords; the answer summarises retrieved context; the
+ *  Ragas metrics are marked `pending` (computed by the backend in phase 2). */
+function mapResult(d: any, technique: Technique, topK: number, chunkTopK: number): RetrievalResult {
+  const g = d?.graph ?? { nodes: [], edges: [] };
+  const nodes: GraphNode[] = (g.nodes ?? []).map((n: any) => ({
+    id: String(n.id),
+    label: String(n.label ?? n.id),
+    cluster: String(n.type ?? n.cluster ?? "unknown").toLowerCase(),
+    type: String(n.type ?? n.cluster ?? "unknown"),
+    size: 50,
+  }));
+  const seen = new Set<string>();
+  const edges: GraphEdge[] = [];
+  for (const e of g.edges ?? []) {
+    const s = String(e.source), t = String(e.target);
+    const id = pairKey(s, t);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    edges.push({ id, source: s, target: t, weight: Number(e.weight ?? 1), label: e.label ? String(e.label) : undefined });
+  }
+  const chunks: Chunk[] = (d?.results ?? []).slice(0, chunkTopK).map((x: any) => ({
+    id: String(x.chunk_id ?? x.id),
+    title: String(x.label ?? x.id),
+    source: technique,
+    score: Number(x.relevance_score ?? 0),
+    snippet: (x.description ? String(x.description).trim() : "") || undefined,
+  }));
+  const keywords: string[] = d?.intent_analysis?.search_terms ?? [];
+  const timeMs = Math.round(Number(d?.time_ms ?? 0));
+  const steps = buildSteps(technique, keywords, nodes.length, edges.length, chunks.length, topK, chunkTopK, timeMs);
+  // answer is generated lazily by generateAnswer() when the Answer tab is opened
+  return { strategy: technique, timeMs, graph: { nodes, edges }, chunks, steps, answer: "", metrics: pendingMetrics() };
+}
+
+function buildSteps(
+  tech: Technique, keywords: string[], nE: number, nR: number, nC: number,
+  topK: number, chunkTopK: number, timeMs: number,
+): Step[] {
+  const kw: Step = { label: "Extract keywords", detail: keywords.join(", ") || "(none)", stat: `${keywords.length} kw` };
+  if (tech === "vector") {
+    return [kw, { label: "Vector chunks", detail: "cosine similarity over chunk embeddings", stat: `${nC} chunks @chunk_top_k ${chunkTopK}`, ms: timeMs }];
+  }
+  const steps: Step[] = [kw];
+  if (tech !== "global") steps.push({ label: "Entity search", detail: "match query entities, expand neighbourhood", stat: `${nE} entities @top_k ${topK}` });
+  if (tech !== "local") steps.push({ label: "Relation search", detail: "rank the strongest relationships", stat: `${nR} relations` });
+  if (tech === "mix") steps.push({ label: "Vector chunks", detail: "cosine similarity over chunk embeddings", stat: `${nC} chunks @chunk_top_k ${chunkTopK}` });
+  steps.push({ label: "Merge → final context", detail: "dedupe, truncate to token budget", stat: `${nE}E · ${nR}R · ${nC}C`, ms: timeMs });
+  return steps;
+}
+
+const RAGAS: [string, string, boolean][] = [
+  ["context_precision", "Context Precision", false],
+  ["faithfulness", "Faithfulness", false],
+  ["answer_relevancy", "Answer Relevancy", false],
+  ["noise_sensitivity", "Noise Sensitivity", false],
+  ["context_recall", "Context Recall", true],
+  ["context_entities_recall", "Context Entities Recall", true],
+  ["recall_at_k", "recall@k", true],
+];
+const pendingMetrics = (): Metric[] =>
+  RAGAS.map(([key, label, referenceBased]) => ({ key, label, referenceBased, value: 0, pending: true }));
+
+/** Generate a grounded answer for the current query under one technique. Kept
+ *  separate from runRetrieval so the graph + chunks render instantly and this
+ *  (slower, LLM) call is only made when the Answer tab is viewed. Same generator
+ *  for every technique on the backend, so only the retrieval differs. */
+export async function generateAnswer(
+  _datasetId: string, query: string, technique: Technique, limit = 5,
+): Promise<{ answer: string; timeMs: number; groundedChunks: number; note?: string }> {
+  try {
+    const url = `${API_BASE}/api/search/answer?q=${encodeURIComponent(query)}&limit=${limit}&force_strategy=${technique}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`/api/search/answer ${r.status}`);
+    const d = await r.json();
+    return {
+      answer: String(d.answer ?? ""),
+      timeMs: Math.round(Number(d.time_ms ?? 0)),
+      groundedChunks: Number(d.grounded_chunks ?? 0),
+      note: d.note ? String(d.note) : undefined,
+    };
+  } catch (err) {
+    console.warn("[api] generateAnswer: backend unreachable —", err);
+    return { answer: "", timeMs: 0, groundedChunks: 0, note: "answer generation unavailable" };
+  }
+}
+
+/** Compute real Ragas-style metrics for the current run under one technique.
+ *  Heavy (retrieval + generation + judge calls), so it's triggered on demand
+ *  from the metrics strip. A metric with no computable value comes back pending
+ *  (reference-based metrics without gold), rendered as "—"/"needs gold". */
+export async function evaluate(
+  _datasetId: string, query: string, technique: Technique, topK: number, chunkTopK: number,
+): Promise<{ metrics: Metric[]; goldMatched: boolean; timeMs: number; note?: string }> {
+  try {
+    const limit = Math.max(topK, chunkTopK, 5);
+    const url = `${API_BASE}/api/search/metrics?q=${encodeURIComponent(query)}&limit=${limit}&force_strategy=${technique}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`/api/search/metrics ${r.status}`);
+    const d = await r.json();
+    const metrics: Metric[] = (d.metrics ?? []).map((m: any) => ({
+      key: String(m.key),
+      label: String(m.label),
+      referenceBased: !!m.reference_based,
+      value: typeof m.value === "number" ? m.value : 0,
+      pending: m.value === null || m.value === undefined,
+    }));
+    return { metrics, goldMatched: !!d.gold_matched, timeMs: Math.round(Number(d.time_ms ?? 0)), note: d.note ? String(d.note) : undefined };
+  } catch (err) {
+    console.warn("[api] evaluate: backend unreachable —", err);
+    return { metrics: [], goldMatched: false, timeMs: 0, note: "metrics unavailable" };
+  }
 }
 
 export async function listDatasets(): Promise<Dataset[]> {

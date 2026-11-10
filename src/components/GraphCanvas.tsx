@@ -10,6 +10,7 @@ import { Crosshair, Maximize2, Shrink, Tag, X } from "lucide-react";
 import clsx from "clsx";
 import type { GraphEdge, GraphNode } from "@/lib/api";
 import { clusterColor, type Signals } from "@/lib/signals";
+import { useHotkeys } from "@/lib/hotkeys";
 import ClusterRegions, { type Orb } from "./ClusterRegions";
 import NodeSearch from "./NodeSearch";
 import NodeInspector from "./NodeInspector";
@@ -251,9 +252,29 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
     window.setTimeout(() => fitTo(orbs.map((o) => ({ x: o.x, y: o.y, r: o.r * 1.3 + 20 }))), 50);
   };
 
+  useHotkeys({
+    f: () => fitVisible(),
+    l: () => setAllLabels((v) => !v),
+    c: () => { if (detail) collapseAll(); },
+    Escape: () => setFocusId(null),
+  });
+
   const selected = selectedId ? nodeBy.get(selectedId) : undefined;
   const visibleNodes = simNodesRef.current;
   const visibleLinks = simLinksRef.current;
+
+  const labelPriority = (n: SimNode) =>
+    (n.id === selectedId ? 1000 : n.id === focusId ? 900 : n.id === hoveredNode ? 800
+      : highlightSet.has(n.id) ? 600 : signals?.context.has(n.id) ? 500
+      : signals?.entity.has(n.id) ? 400 : signals?.vector.has(n.id) ? 300 : 0) + (degree.get(n.id) ?? 0);
+
+  // Positions move every tick, so this recomputes each render (cheap at this graph size).
+  const labels = placeLabels(
+    visibleNodes.filter(showLabel),
+    visibleNodes.filter((n) => !emphasis || emphasis.has(n.id)),
+    labelPriority,
+    transform.k,
+  );
 
   return (
     <section className="card flex h-full min-h-0 flex-col p-0">
@@ -267,10 +288,10 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
           <ToolToggle on={follow} onClick={() => setFollow((f) => !f)} icon={<Crosshair size={13} />} label="follow"
             title="Follow: auto-zoom to each new result" />
           <ToolToggle on={allLabels} onClick={() => setAllLabels((f) => !f)} icon={<Tag size={13} />} label="labels"
-            title="Show every node label" />
+            title="Label every node that fits (l)" />
           <span className="mx-0.5 h-4 w-px bg-line" />
-          <ToolButton onClick={() => fitVisible()} title="Fit to view"><Maximize2 size={13} /></ToolButton>
-          <ToolButton onClick={collapseAll} disabled={!detail} title="Collapse all regions"><Shrink size={13} /></ToolButton>
+          <ToolButton onClick={() => fitVisible()} title="Fit to view (f)"><Maximize2 size={13} /></ToolButton>
+          <ToolButton onClick={collapseAll} disabled={!detail} title="Collapse all regions (c)"><Shrink size={13} /></ToolButton>
         </div>
       </div>
 
@@ -314,15 +335,20 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
                       <circle r={n.r + 4} fill="none" stroke={isSel ? "var(--local)" : "var(--ink)"} strokeWidth={1.5} opacity={0.9} />
                     )}
                     <circle r={n.r} fill={nodeFill(n)} stroke="var(--bg)" strokeWidth={1.5} />
-                    {showLabel(n) && (
-                      <text y={n.r + 4 + 10 / transform.k} textAnchor="middle" className="select-none fill-ink font-mono"
-                        style={{ fontSize: 10.5 / transform.k, paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 / transform.k }}>
-                        {n.label}
-                      </text>
-                    )}
                   </g>
                 );
               })}
+            </g>
+            {/* labels in their own top layer so a later node never paints over an earlier label */}
+            <g>
+              {labels.map((lb) => (
+                <text key={lb.id} x={lb.x} y={lb.y} textAnchor={lb.anchor} className="cursor-pointer select-none fill-ink font-mono"
+                  style={{ fontSize: 10.5 / transform.k, paintOrder: "stroke", stroke: "var(--bg)", strokeWidth: 3 / transform.k }}
+                  onMouseEnter={() => setHoveredNode(lb.id)} onMouseLeave={() => setHoveredNode(null)}
+                  onClick={(e) => { e.stopPropagation(); onSelect(lb.id === selectedId ? null : lb.id); }}>
+                  {lb.text}
+                </text>
+              ))}
             </g>
           </g>
         </svg>
@@ -354,6 +380,48 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
       </div>
     </section>
   );
+}
+
+type Box = { x0: number; y0: number; x1: number; y1: number };
+type PlacedLabel = { id: string; text: string; x: number; y: number; anchor: "start" | "middle" | "end" };
+
+const boxesOverlap = (a: Box, b: Box) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+function circleHitsBox(c: SimNode, b: Box) {
+  const cx = c.x ?? 0, cy = c.y ?? 0;
+  const dx = cx - Math.max(b.x0, Math.min(cx, b.x1));
+  const dy = cy - Math.max(b.y0, Math.min(cy, b.y1));
+  return dx * dx + dy * dy < c.r * c.r;
+}
+
+/**
+ * Greedy label placement, highest priority first. Each label tries below,
+ * above, right, then left of its node, and takes the first slot that hits
+ * neither an already-placed label nor another visible node. Labels with no
+ * free slot are dropped, except must-show ones (selected / focused / hovered),
+ * which fall back to "below". "All labels" therefore means "every label that fits".
+ * Works in graph units; label size is constant on screen, so it scales by 1/k.
+ */
+function placeLabels(candidates: SimNode[], obstacles: SimNode[], priority: (n: SimNode) => number, k: number): PlacedLabel[] {
+  const charW = 6.4 / k, lh = 12 / k, gap = 3 / k, pad = 1.5 / k;
+  const placed: Box[] = [];
+  const out: PlacedLabel[] = [];
+  for (const n of [...candidates].sort((a, b) => priority(b) - priority(a))) {
+    const x = n.x ?? 0, y = n.y ?? 0, w = n.label.length * charW;
+    const slots: { x0: number; y0: number; tx: number; anchor: PlacedLabel["anchor"] }[] = [
+      { x0: x - w / 2, y0: y + n.r + gap, tx: x, anchor: "middle" },
+      { x0: x - w / 2, y0: y - n.r - gap - lh, tx: x, anchor: "middle" },
+      { x0: x + n.r + gap, y0: y - lh / 2, tx: x + n.r + gap, anchor: "start" },
+      { x0: x - n.r - gap - w, y0: y - lh / 2, tx: x - n.r - gap, anchor: "end" },
+    ];
+    const boxOf = (s: (typeof slots)[number]): Box => ({ x0: s.x0 - pad, y0: s.y0 - pad, x1: s.x0 + w + pad, y1: s.y0 + lh + pad });
+    const free = (b: Box) => !placed.some((p) => boxesOverlap(p, b)) && !obstacles.some((o) => o.id !== n.id && circleHitsBox(o, b));
+    let slot = slots.find((s) => free(boxOf(s)));
+    if (!slot && priority(n) >= 800) slot = slots[0];
+    if (!slot) continue;
+    placed.push(boxOf(slot));
+    out.push({ id: n.id, text: n.label, x: slot.tx, y: slot.y0 + lh * 0.8, anchor: slot.anchor });
+  }
+  return out;
 }
 
 function ToolToggle({ on, onClick, icon, label, title }: { on: boolean; onClick: () => void; icon: ReactNode; label: string; title: string }) {

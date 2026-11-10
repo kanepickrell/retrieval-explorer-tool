@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getGraph, runRetrieval, type Chunk, type GraphEdge, type GraphNode, type RetrievalResult, type Technique } from "@/lib/api";
+import { evaluate, generateAnswer, getGraph, TECHNIQUES, type Chunk, type GraphEdge, type GraphNode, type Metric } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
+import { useHotkeys } from "@/lib/hotkeys";
 import { deriveSignals } from "@/lib/signals";
 import QuestionCard from "@/components/QuestionCard";
 import ModeCard from "@/components/ModeCard";
@@ -10,55 +11,77 @@ import InspectorTabs from "@/components/InspectorTabs";
 const EMPTY = { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
 
 export default function Explorer() {
-  const { datasetId, dataset, highlight, setHighlight } = useExplorer();
+  const {
+    datasetId, highlight, setHighlight,
+    query, run, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
+    result, resultKey, loading,
+  } = useExplorer();
 
   const [graph, setGraph] = useState(EMPTY);
-  const [input, setInput] = useState("");
-  const [query, setQuery] = useState("");
-  const [runNonce, setRunNonce] = useState(0);
-  const [technique, setTechnique] = useState<Technique>("mix");
-  const [topK, setTopK] = useState(10);
-  const [chunkTopK, setChunkTopK] = useState(5);
-  const [result, setResult] = useState<RetrievalResult | null>(null);
-  const [resultKey, setResultKey] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [input, setInput] = useState(query);
   const [tab, setTab] = useState("steps");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeChunk, setActiveChunk] = useState<Chunk | null>(null);
-  const reqId = useRef(0);
+  const [answer, setAnswer] = useState<{ key: string; text: string } | null>(null);
+  const [answerLoading, setAnswerLoading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const answerReq = useRef(0);                       // guards against superseded responses
+  const answerCache = useRef(new Map<string, string>()); // generated answer per run
+
+  // identifies the answer for the current run; changes when the question, technique or knobs change
+  const answerKey = result ? `${query}:::${technique}:::${topK}:::${chunkTopK}:::${resultKey}` : "";
+
+  // Generate the answer lazily — only when the Answer tab is open, once per run (cached).
+  // Generation is a slow LLM call (global/hybrid ~7-8s), so retrieval never waits on it, and a
+  // request-id guard means switching technique mid-flight supersedes cleanly instead of stalling.
+  useEffect(() => {
+    if (tab !== "answer" || !result || !answerKey) return;
+    const cached = answerCache.current.get(answerKey);
+    if (cached !== undefined) { setAnswer({ key: answerKey, text: cached }); setAnswerLoading(false); return; }
+    const id = ++answerReq.current;
+    setAnswerLoading(true);
+    generateAnswer(datasetId, query, technique, chunkTopK).then((r) => {
+      const text = r.answer || (r.note ? `_${r.note}_` : "_No answer was generated._");
+      answerCache.current.set(answerKey, text);       // cache even if the view moved on
+      if (id !== answerReq.current) return;            // a newer request superseded this one
+      setAnswer({ key: answerKey, text });
+      setAnswerLoading(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, answerKey]);
+
+  // Ragas metrics: computed on demand (expensive: retrieval + generation + judge calls).
+  const [evalState, setEvalState] = useState<{ key: string; metrics: Metric[] } | null>(null);
+  const [evalLoading, setEvalLoading] = useState(false);
+  const evalReq = useRef(0);
+  const runEvaluate = useCallback(() => {
+    if (!result || !answerKey) return;
+    const key = answerKey;
+    const id = ++evalReq.current;
+    setEvalLoading(true);
+    evaluate(datasetId, query, technique, topK, chunkTopK).then((r) => {
+      if (id !== evalReq.current) return;
+      setEvalState({ key, metrics: r.metrics });
+      setEvalLoading(false);
+    });
+  }, [result, answerKey, datasetId, query, technique, topK, chunkTopK]);
 
   useEffect(() => {
     let live = true;
-    setResult(null);
     getGraph(datasetId).then((g) => live && setGraph(g));
     return () => { live = false; };
   }, [datasetId]);
 
-  // Re-run whenever the query, technique or knobs change (sliders debounced).
-  useEffect(() => {
-    if (!query) return;
-    const id = ++reqId.current;
-    const t = window.setTimeout(() => {
-      setLoading(true);
-      runRetrieval(datasetId, query, technique, topK, chunkTopK).then((r) => {
-        if (id !== reqId.current) return; // a newer request superseded this one
-        setResult(r);
-        setResultKey((k) => k + 1);
-        setActiveChunk(null);
-        setLoading(false);
-      });
-    }, 200);
-    return () => window.clearTimeout(t);
-  }, [datasetId, query, runNonce, technique, topK, chunkTopK]);
+  // a new result invalidates the chunk the user had clicked
+  useEffect(() => { setActiveChunk(null); }, [resultKey]);
 
-  const run = useCallback((q: string) => {
-    setHighlight(null);
-    setQuery(q);
-    setRunNonce((n) => n + 1); // re-submitting the same text still re-runs
-  }, [setHighlight]);
+  useHotkeys({
+    "/": () => inputRef.current?.focus(),
+    ...Object.fromEntries(TECHNIQUES.map((t, i) => [String(i + 1), () => setTechnique(t)])),
+    Escape: () => { setSelectedId(null); setActiveChunk(null); setHighlight(null); },
+  });
 
   const signals = useMemo(() => deriveSignals(result), [result]);
-
   const chunkHighlight = useMemo(
     () => (activeChunk ? { label: activeChunk.title, ids: activeChunk.entities ?? [] } : null),
     [activeChunk],
@@ -67,7 +90,8 @@ export default function Explorer() {
   return (
     <main className="mt-5 flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-        <QuestionCard value={input} onChange={setInput} onRun={run} loading={loading} activeQuery={result ? query : ""} />
+        <QuestionCard value={input} onChange={setInput} onRun={run} loading={loading}
+          activeQuery={result ? query : ""} inputRef={inputRef} />
         <ModeCard technique={technique} onTechnique={setTechnique} topK={topK} onTopK={setTopK} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:h-[700px] lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
@@ -86,11 +110,15 @@ export default function Explorer() {
           <InspectorTabs
             result={result}
             loading={loading}
-            labeled={!!dataset?.labeled}
             tab={tab}
             onTab={setTab}
             activeChunkId={activeChunk?.id ?? null}
             onChunk={setActiveChunk}
+            answer={answer?.key === answerKey ? answer.text : ""}
+            answerLoading={answerLoading}
+            evalMetrics={evalState?.key === answerKey ? evalState.metrics : null}
+            evalLoading={evalLoading}
+            onEvaluate={runEvaluate}
           />
         </div>
       </div>

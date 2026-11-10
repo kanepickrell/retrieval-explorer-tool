@@ -1,6 +1,6 @@
 import * as Tabs from "@radix-ui/react-tabs";
 import { Loader2 } from "lucide-react";
-import type { Chunk, RetrievalResult } from "@/lib/api";
+import type { Chunk, Metric, RetrievalResult } from "@/lib/api";
 import StepsPanel from "./StepsPanel";
 import ContextPanel from "./ContextPanel";
 import AnswerPanel from "./AnswerPanel";
@@ -9,11 +9,15 @@ import MetricsStrip from "./MetricsStrip";
 type Props = {
   result: RetrievalResult | null;
   loading: boolean;
-  labeled: boolean;
   tab: string;
   onTab: (t: string) => void;
   activeChunkId: string | null;
   onChunk: (c: Chunk | null) => void;
+  answer: string;
+  answerLoading: boolean;
+  evalMetrics: Metric[] | null;
+  evalLoading: boolean;
+  onEvaluate: () => void;
 };
 
 const TAB =
@@ -37,7 +41,7 @@ function Summary({ r, loading }: { r: RetrievalResult; loading: boolean }) {
   );
 }
 
-export default function InspectorTabs({ result, loading, labeled, tab, onTab, activeChunkId, onChunk }: Props) {
+export default function InspectorTabs({ result, loading, tab, onTab, activeChunkId, onChunk, answer, answerLoading, evalMetrics, evalLoading, onEvaluate }: Props) {
   const empty = (
     <div className="flex h-full flex-col items-center justify-center gap-1 py-10 text-center">
       {loading ? <Loader2 size={18} className="animate-spin text-local" /> : null}
@@ -64,11 +68,11 @@ export default function InspectorTabs({ result, loading, labeled, tab, onTab, ac
             {result ? <ContextPanel chunks={result.chunks} activeId={activeChunkId} onSelect={onChunk} /> : empty}
           </Tabs.Content>
           <Tabs.Content value="answer" className="h-full">
-            {result ? <AnswerPanel answer={result.answer} chunkCount={result.chunks.length} onShowContext={() => onTab("context")} /> : empty}
+            {result ? <AnswerPanel answer={answer} loading={answerLoading} chunkCount={result.chunks.length} onShowContext={() => onTab("context")} /> : empty}
           </Tabs.Content>
         </div>
       </Tabs.Root>
-      <MetricsStrip result={result} labeled={labeled} />
+      <MetricsStrip result={result} computed={evalMetrics} loading={evalLoading} onEvaluate={onEvaluate} />
     </section>
   );
 }

@@ -1,0 +1,134 @@
+[
+  {
+    "id": "q-kerberoast",
+    "query": "my caldera kerberoasting ability yaml keeps getting rejected by the loader",
+    "gold_ids": [
+      "chat-0001.md",
+      "chat-0002.md",
+      "chat-0003.md",
+      "chat-0004.md",
+      "chat-0005.md",
+      "chat-0006.md",
+      "chat-0007.md",
+      "chat-0008.md",
+      "chat-0009.md",
+      "chat-0010.md",
+      "chat-0011.md",
+      "chat-0012.md",
+      "chat-0013.md",
+      "chat-0014.md",
+      "chat-0141.md",
+      "chat-0142.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Writing a caldera ability yaml' docs (16)"
+  },
+  {
+    "id": "q-winrm",
+    "query": "winrm second hop fails, kerberos credentials are not delegating",
+    "gold_ids": [
+      "chat-0015.md",
+      "chat-0016.md",
+      "chat-0017.md",
+      "chat-0018.md",
+      "chat-0019.md",
+      "chat-0020.md",
+      "chat-0021.md",
+      "chat-0022.md",
+      "chat-0023.md",
+      "chat-0024.md",
+      "chat-0143.md",
+      "chat-0144.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Winrm double-hop / kerberos failure' docs (12)"
+  },
+  {
+    "id": "q-range",
+    "query": "stand up an AD range with a domain controller, workstations and a kali attacker",
+    "gold_ids": [
+      "chat-0041.md",
+      "chat-0042.md",
+      "chat-0043.md",
+      "chat-0044.md",
+      "chat-0045.md",
+      "chat-0046.md",
+      "chat-0047.md",
+      "chat-0048.md",
+      "chat-0049.md",
+      "chat-0050.md",
+      "chat-0051.md",
+      "chat-0052.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Provisioning a range environment' docs (12)"
+  },
+  {
+    "id": "q-attack-map",
+    "query": "map this observed adversary behavior to the correct att&ck technique id",
+    "gold_ids": [
+      "chat-0025.md",
+      "chat-0026.md",
+      "chat-0027.md",
+      "chat-0028.md",
+      "chat-0029.md",
+      "chat-0030.md",
+      "chat-0031.md",
+      "chat-0032.md",
+      "chat-0033.md",
+      "chat-0034.md",
+      "chat-0035.md",
+      "chat-0036.md",
+      "chat-0037.md",
+      "chat-0038.md",
+      "chat-0039.md",
+      "chat-0040.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Mapping a behavior to att&ck' docs (16)"
+  },
+  {
+    "id": "q-cve",
+    "query": "look up the details and exploitability of a specific CVE",
+    "gold_ids": [
+      "chat-0074.md",
+      "chat-0075.md",
+      "chat-0076.md",
+      "chat-0077.md",
+      "chat-0078.md",
+      "chat-0079.md",
+      "chat-0080.md",
+      "chat-0081.md",
+      "chat-0082.md",
+      "chat-0083.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Researching a cve' docs (10)"
+  },
+  {
+    "id": "q-logs",
+    "query": "triage these process logs for suspicious activity",
+    "gold_ids": [
+      "chat-0053.md",
+      "chat-0054.md",
+      "chat-0055.md",
+      "chat-0056.md",
+      "chat-0057.md",
+      "chat-0058.md",
+      "chat-0059.md",
+      "chat-0060.md",
+      "chat-0061.md",
+      "chat-0062.md",
+      "chat-0063.md",
+      "chat-0064.md"
+    ],
+    "query_type": "focused_topic",
+    "breadth": "focused",
+    "note": "gold = all 'Triaging process logs' docs (12)"
+  }
+]

@@ -1,5 +1,7 @@
 import * as Slider from "@radix-ui/react-slider";
 import clsx from "clsx";
+import { Link } from "react-router-dom";
+import { BarChart3 } from "lucide-react";
 import { TECHNIQUES, type Technique } from "@/lib/api";
 
 const HINTS: Record<Technique, string> = {
@@ -36,10 +38,15 @@ function Range({ label, value, min, max, onChange }: { label: string; value: num
 export default function ModeCard(p: Props) {
   return (
     <section className="card flex flex-col gap-3">
-      <h2 className="caption">Mode</h2>
+      <div className="flex items-baseline justify-between">
+        <h2 className="caption">Mode</h2>
+        <Link to="/compare" className="flex items-center gap-1 font-mono text-[11px] text-muted hover:text-ink">
+          <BarChart3 size={12} />compare all
+        </Link>
+      </div>
       <div role="radiogroup" className="grid grid-cols-5 rounded-md border border-line bg-bg p-0.5">
-        {TECHNIQUES.map((t) => (
-          <button key={t} role="radio" aria-checked={p.technique === t} onClick={() => p.onTechnique(t)}
+        {TECHNIQUES.map((t, i) => (
+          <button key={t} role="radio" aria-checked={p.technique === t} onClick={() => p.onTechnique(t)} title={`${t} (press ${i + 1})`}
             className={clsx("rounded px-2 py-1.5 font-mono text-xs transition-colors",
               p.technique === t ? "bg-surface-2 text-ink shadow-[inset_0_0_0_1px_var(--line)]" : "text-muted hover:text-ink")}>
             {t}

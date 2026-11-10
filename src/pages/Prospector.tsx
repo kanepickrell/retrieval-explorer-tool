@@ -1,16 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ArrowRight, FileText } from "lucide-react";
-import clsx from "clsx";
 import { listDocuments, type DocumentSummary } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
 import ProspectorTable from "@/components/ProspectorTable";
+import FlowStepper from "@/components/FlowStepper";
 
-const FLOW = [
-  ["Prospector", "data"],
-  ["Explorer", "retrieval"],
-  ["Metrics", "which technique wins"],
-] as const;
 
 export default function Prospector() {
   const { datasets, datasetId, dataset, setDatasetId, setHighlight } = useExplorer();
@@ -30,16 +25,7 @@ export default function Prospector() {
 
   return (
     <main className="mt-5 flex flex-col gap-4">
-      <ol className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
-        {FLOW.map(([name, role], i) => (
-          <li key={name} className="flex items-center gap-2">
-            <span className={clsx("rounded-full border px-2.5 py-0.5", i === 0 ? "border-local/60 text-ink" : "border-line text-muted")}>
-              {name} <span className="text-muted">({role})</span>
-            </span>
-            {i < FLOW.length - 1 && <ArrowRight size={12} className="text-muted/60" />}
-          </li>
-        ))}
-      </ol>
+      <FlowStepper active={0} />
 
       <section className="card">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

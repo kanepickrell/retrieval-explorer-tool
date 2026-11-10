@@ -1,3 +1,4 @@
+import type { RefObject } from "react";
 import { Loader2, Search } from "lucide-react";
 import clsx from "clsx";
 import { SAMPLE_QUERIES } from "@/lib/api";
@@ -9,15 +10,19 @@ type Props = {
   loading: boolean;
   /** the query that produced the current result, to mark its chip */
   activeQuery: string;
+  inputRef?: RefObject<HTMLInputElement>;
 };
 
-export default function QuestionCard({ value, onChange, onRun, loading, activeQuery }: Props) {
+export default function QuestionCard({ value, onChange, onRun, loading, activeQuery, inputRef }: Props) {
   return (
     <section className="card flex flex-col gap-3">
-      <h2 className="caption">Question</h2>
+      <div className="flex items-baseline justify-between">
+        <h2 className="caption">Question</h2>
+        <kbd className="font-mono text-[10px] text-muted/60">press /</kbd>
+      </div>
       <form className="relative" onSubmit={(e) => { e.preventDefault(); if (value.trim()) onRun(value.trim()); }}>
         <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
-        <input className="input h-11 pl-9 pr-28 text-[15px]" placeholder="Ask anything about the documents"
+        <input ref={inputRef} className="input h-11 pl-9 pr-28 text-[15px]" placeholder="Ask anything about the documents"
           value={value} onChange={(e) => onChange(e.target.value)} aria-label="Question" />
         <button type="submit" className="btn-primary absolute right-1.5 top-1/2 h-8 -translate-y-1/2 px-3" disabled={loading || !value.trim()}>
           {loading ? <Loader2 size={14} className="animate-spin" /> : null} Search
