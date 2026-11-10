@@ -191,6 +191,7 @@ async def evaluate(run_id: str = Query(..., description="run_id from /unified"))
 
     gold = M.match_gold(run.query, DS.gold_entries(ds))
     recall = M.recall_at_k(run.retrieved_ids, gold.get("gold_ids", []), run.limit) if gold else None
+    precision = M.precision_at_k(run.retrieved_ids, gold.get("gold_ids", []), run.limit) if gold else None
 
     ref_based = {"context_recall": None, "context_entities_recall": None, "noise_sensitivity": None}
     if gold and gold.get("reference") and contexts:
@@ -210,6 +211,7 @@ async def evaluate(run_id: str = Query(..., description="run_id from /unified"))
         tile("context_entities_recall", "Context Entities Recall", ref_based["context_entities_recall"], True),
         tile("noise_sensitivity", "Noise Sensitivity", ref_based["noise_sensitivity"], True),
         tile("recall_at_k", "recall@k", recall, True),
+        tile("precision_at_k", "precision@k", precision, True),
     ]
     return {
         "run_id": run.id, "query": run.query, "strategy": run.strategy, "dataset": ds.id,

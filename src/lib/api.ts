@@ -186,6 +186,7 @@ const RAGAS: [string, string, boolean][] = [
   ["context_recall", "Context Recall", true],
   ["context_entities_recall", "Context Entities Recall", true],
   ["recall_at_k", "recall@k", true],
+  ["precision_at_k", "precision@k", true],
 ];
 const pendingMetrics = (): Metric[] =>
   RAGAS.map(([key, label, referenceBased]) => ({ key, label, referenceBased, value: 0, pending: true }));

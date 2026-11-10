@@ -282,6 +282,17 @@ def recall_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
     return round(hit / len(gold_ids), 3)
 
 
+def precision_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
+    """|retrieved_topk ∩ gold| / k. Divides by k even when fewer than k docs came
+    back (standard definition: an empty slot counts as a miss). Read it alongside
+    recall@k, whose ceiling is k/|gold| when the gold set is larger than k."""
+    if k <= 0:
+        return 0.0
+    gold = set(gold_ids)
+    hit = sum(1 for r in retrieved_ids[:k] if r in gold)
+    return round(hit / k, 3)
+
+
 # ───────────────────────── orchestrator ─────────────────────────
 
 async def reference_free(query: str, answer: str, contexts: List[str],

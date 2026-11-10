@@ -10,6 +10,11 @@ const SHORT: Record<string, string> = {
   context_recall: "Context recall",
   context_entities_recall: "Entities recall",
   recall_at_k: "recall@k",
+  precision_at_k: "precision@k",
+};
+const HINT: Record<string, string> = {
+  recall_at_k: "gold docs in the top k ÷ all gold docs. Can't exceed k ÷ gold size when the gold set is bigger than k — read with precision@k.",
+  precision_at_k: "gold docs in the top k ÷ k: how much of what was retrieved is relevant.",
 };
 
 // the tiles shown before evaluation — all pending (no fabricated values)
@@ -21,6 +26,7 @@ const PLACEHOLDER: Metric[] = [
   { key: "context_entities_recall", label: "Context Entities Recall", referenceBased: true, value: 0, pending: true },
   { key: "noise_sensitivity", label: "Noise Sensitivity", referenceBased: true, value: 0, pending: true },
   { key: "recall_at_k", label: "recall@k", referenceBased: true, value: 0, pending: true },
+  { key: "precision_at_k", label: "precision@k", referenceBased: true, value: 0, pending: true },
 ];
 
 function Row({ m }: { m: Metric }) {
@@ -30,7 +36,7 @@ function Row({ m }: { m: Metric }) {
   const q = lower ? 1 - m.value : m.value;
   const tone = q >= 0.75 ? "var(--good)" : q >= 0.55 ? "var(--warn)" : "var(--bad)";
   return (
-    <div className="flex items-center gap-2 py-[3px]" title={`${m.label}${lower ? " — lower is better" : ""}`}>
+    <div className="flex items-center gap-2 py-[3px]" title={`${m.label}${lower ? " — lower is better" : ""}${HINT[m.key] ? ` — ${HINT[m.key]}` : ""}`}>
       <span className="min-w-0 flex-1 truncate text-xs text-muted">
         {SHORT[m.key] ?? m.label}{lower && <span className="ml-1 text-muted/60">↓</span>}
       </span>

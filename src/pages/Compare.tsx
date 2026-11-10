@@ -60,6 +60,7 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
       metricRow("context_entities_recall", "Entities recall"),
       metricRow("noise_sensitivity", "Noise sensitivity"),
       metricRow("recall_at_k", "recall@k"),
+      metricRow("precision_at_k", "precision@k"),
     ],
   },
 ];
