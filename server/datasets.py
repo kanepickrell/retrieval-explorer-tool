@@ -83,9 +83,16 @@ def duplicate_aliases(ds: Dataset) -> Dict[str, str]:
 
 
 def gold_entries(ds: Dataset) -> List[dict]:
+    """The dataset's gold set: eval_set.json (real user requests) plus, when
+    present, eval_set_generated.json next to it (LLM-written questions, tagged
+    query_type generated_*)."""
     g = _read(ds.gold) if ds.gold and ds.gold.exists() else None
     if not isinstance(g, list):
         return []
+    gen = ds.gold.parent / "eval_set_generated.json"
+    extra = _read(gen) if ds.gold.name == "eval_set.json" and gen.exists() else None
+    if isinstance(extra, list):
+        g = g + extra
     alias = duplicate_aliases(ds)
     if alias:
         for e in g:
@@ -119,6 +126,7 @@ def describe(ds: Dataset) -> dict:
         "duplicate_rows": duplicates,
         "updated": datetime.fromtimestamp(mtime, timezone.utc).strftime("%Y-%m-%d") if mtime else None,
         "labeled": bool(gold), "gold_queries": len(gold),
+        "generated_queries": sum(1 for x in gold if str(x.get("query_type", "")).startswith("generated")),
         "has_reference_answers": any(g.get("reference") for g in gold),
         "status": state, "samples": samples,
     }
