@@ -30,21 +30,21 @@ STORAGE_DIR = os.getenv("PROTOGRAPH_CORPUS_STORAGE", _DEFAULT_STORAGE)
 EMBED_HOST = os.getenv("PROTOGRAPH_EMBED_HOST", "http://10.128.241.200:11434")
 EMBED_MODEL = os.getenv("PROTOGRAPH_EMBED_MODEL", "nomic-embed-text")
 
-# lazily-loaded corpus index for the process
-_INDEX: Optional[Dict] = None  # {"ids":[chunk_id], "titles":[file_path], "contents":[...], "mat":[[float]]}
+# lazily-loaded corpus indexes, one per storage dir
+# {storage_dir: {"ids":[chunk_id], "titles":[file_path], "contents":[...], "mat":[[float]]}}
+_INDEX: Dict[str, Dict] = {}
 
 
 def _load_index(storage_dir: str = None) -> Dict:
     """Load + decode vdb_chunks.json once. Matrix rows are already normalized."""
-    global _INDEX
-    if _INDEX is not None:
-        return _INDEX
-    sd = Path(storage_dir or STORAGE_DIR)
+    key = str(storage_dir or STORAGE_DIR)
+    if key in _INDEX:
+        return _INDEX[key]
+    sd = Path(key)
     f = sd / "vdb_chunks.json"
     if not f.exists():
-        _INDEX = {"ids": [], "titles": [], "contents": [], "mat": [], "dim": 0,
+        return {"ids": [], "titles": [], "contents": [], "mat": [], "dim": 0,
                   "error": f"vdb_chunks.json not found in {sd}"}
-        return _INDEX
     d = json.loads(f.read_text(encoding="utf-8"))
     data = d["data"]
     dim = int(d["embedding_dim"])
@@ -53,13 +53,13 @@ def _load_index(storage_dir: str = None) -> Dict:
     import struct
     flat = struct.unpack(f"<{len(raw)//4}f", raw)
     mat = [list(flat[i * dim:(i + 1) * dim]) for i in range(len(data))]
-    _INDEX = {
+    _INDEX[key] = {
         "ids": [r.get("__id__", "") for r in data],
         "titles": [r.get("file_path", r.get("full_doc_id", "")) for r in data],
         "contents": [r.get("content", "") for r in data],
         "mat": mat, "dim": dim, "error": None,
     }
-    return _INDEX
+    return _INDEX[key]
 
 
 def _embed_query(text: str) -> Optional[List[float]]:

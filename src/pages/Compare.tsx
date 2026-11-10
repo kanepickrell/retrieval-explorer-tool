@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, Trophy } from "lucide-react";
 import clsx from "clsx";
-import { runRetrieval, TECHNIQUES, type RetrievalResult, type Technique } from "@/lib/api";
+import { evaluate, runRetrieval, TECHNIQUES, type Metric, type RetrievalResult, type Technique } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
 import { useHotkeys } from "@/lib/hotkeys";
 import { LOWER_IS_BETTER, overallScore, scoredMetrics } from "@/lib/score";
@@ -49,7 +49,6 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
       metricRow("context_precision", "Context precision"),
       metricRow("faithfulness", "Faithfulness"),
       metricRow("answer_relevancy", "Answer relevancy"),
-      metricRow("noise_sensitivity", "Noise sensitivity"),
     ],
   },
   {
@@ -59,6 +58,7 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
     rows: [
       metricRow("context_recall", "Context recall"),
       metricRow("context_entities_recall", "Entities recall"),
+      metricRow("noise_sensitivity", "Noise sensitivity"),
       metricRow("recall_at_k", "recall@k"),
     ],
   },
@@ -66,9 +66,18 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
 
 /** Runs the current question through every technique and ranks them side by side. */
 export default function Compare() {
-  const { datasetId, dataset, query, run, runNonce, topK, chunkTopK, setTechnique } = useExplorer();
+  const { datasetId, dataset, query, run, runNonce, topK, chunkTopK, setTechnique, reportError } = useExplorer();
   const [input, setInput] = useState(query);
-  const [runs, setRuns] = useState<Runs>({});
+  const [rawRuns, setRuns] = useState<Runs>({});
+  // metrics computed on demand per technique (LLM judge, slow) -- merged over the pending placeholders
+  const [evals, setEvals] = useState<Partial<Record<Technique, Metric[]>>>({});
+  const [evalNotes, setEvalNotes] = useState<Partial<Record<Technique, string>>>({});
+  const [evaluating, setEvaluating] = useState<Technique | null>(null);
+  const evalRun = useRef(0);
+  const runs: Runs = useMemo(
+    () => Object.fromEntries(Object.entries(rawRuns).map(([t, r]) => [t, evals[t as Technique] ? { ...r!, metrics: evals[t as Technique]! } : r])) as Runs,
+    [rawRuns, evals],
+  );
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
@@ -77,14 +86,14 @@ export default function Compare() {
   useHotkeys({ "/": () => inputRef.current?.focus() });
 
   useEffect(() => {
-    if (!query) return;
+    if (!query || !datasetId) return;
     let live = true;
     setLoading(true);
-    Promise.all(TECHNIQUES.map((t) => runRetrieval(datasetId, query, t, topK, chunkTopK))).then((rs) => {
-      if (!live) return;
-      setRuns(Object.fromEntries(rs.map((r) => [r.strategy, r])) as Runs);
-      setLoading(false);
-    });
+    setEvals({}); setEvalNotes({}); setEvaluating(null); evalRun.current++;
+    Promise.all(TECHNIQUES.map((t) => runRetrieval(datasetId, query, t, topK, chunkTopK)))
+      .then((rs) => { if (live) setRuns(Object.fromEntries(rs.map((r) => [r.strategy, r])) as Runs); })
+      .catch((e) => { if (live) { setRuns({}); reportError(String(e.message ?? e)); } })
+      .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [datasetId, query, runNonce, topK, chunkTopK]);
 
@@ -99,6 +108,22 @@ export default function Compare() {
   const winner = ranking[0];
 
   const open = (t: Technique) => { setTechnique(t); navigate("/"); };
+
+  /** Evaluate every technique, one after another (each is retrieval + generation + several judge calls). */
+  const evaluateAll = async () => {
+    const id = ++evalRun.current;
+    setEvals({}); setEvalNotes({});
+    for (const t of TECHNIQUES) {
+      if (id !== evalRun.current) return; // query changed mid-run
+      setEvaluating(t);
+      const r = await evaluate(datasetId, query, t, topK, chunkTopK);
+      if (id !== evalRun.current) return;
+      if (r.metrics.length) setEvals((e) => ({ ...e, [t]: r.metrics }));
+      if (r.note) setEvalNotes((n) => ({ ...n, [t]: r.note }));
+    }
+    setEvaluating(null);
+  };
+  const evaluatedCount = Object.keys(evals).length;
 
   return (
     <main className="mt-5 flex flex-col gap-4">
@@ -141,9 +166,20 @@ export default function Compare() {
             </section>
           )}
 
-          {ready && !scorable && (
-            <section className="card text-sm text-muted">
-              Quality metrics are still pending for every technique, so there is no winner yet. Cost and footprint are compared below.
+          {ready && (
+            <section className="card flex flex-wrap items-center gap-3 text-sm">
+              <button className="btn-primary h-8 px-3" onClick={evaluateAll} disabled={!!evaluating}>
+                {evaluating ? <Loader2 size={14} className="animate-spin" /> : null}
+                {evaluating ? `evaluating ${evaluating}… (${evaluatedCount}/${TECHNIQUES.length})` : evaluatedCount ? "re-evaluate all" : "evaluate all techniques"}
+              </button>
+              <span className="text-xs text-muted">
+                {!scorable
+                  ? "Quality metrics are computed on demand by the LLM judge (about a minute per technique). Until then there is no winner; cost and footprint are compared below."
+                  : `${evaluatedCount}/${TECHNIQUES.length} techniques evaluated.`}
+              </span>
+              {Object.entries(evalNotes).map(([t, n]) => (
+                <span key={t} className="w-full font-mono text-[11px] text-red-400">{t}: {n}</span>
+              ))}
             </section>
           )}
 

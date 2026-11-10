@@ -13,7 +13,8 @@ export default function ProspectorTable({ datasets, activeId, onSelect }: Props)
           <tr className="caption text-left">
             <th className="px-3 py-2 font-normal">name</th>
             <th className="px-3 py-2 font-normal">kind</th>
-            <th className="px-3 py-2 text-right font-normal">rows</th>
+            <th className="px-3 py-2 text-right font-normal">docs</th>
+            <th className="px-3 py-2 font-normal">status</th>
             <th className="px-3 py-2 font-normal">updated</th>
             <th className="px-3 py-2 font-normal">gold</th>
           </tr>
@@ -32,8 +33,14 @@ export default function ProspectorTable({ datasets, activeId, onSelect }: Props)
                 </td>
                 <td className="px-3 py-2.5 font-mono text-xs" style={{ color: KIND_COLOR[d.kind] }}>{d.kind}</td>
                 <td className="px-3 py-2.5 text-right font-mono text-xs tabular">{d.rows.toLocaleString()}</td>
-                <td className="px-3 py-2.5 font-mono text-xs text-muted">{d.updated}</td>
-                <td className="px-3 py-2.5 font-mono text-xs text-muted">{d.labeled ? "labeled" : "—"}</td>
+                <td className="px-3 py-2.5 font-mono text-xs text-muted">
+                  {d.status === "ready" ? "ready" : `${d.status} ${d.rows}/${d.expectedRows}`}
+                  {d.failedRows > 0 && <span className="ml-1 text-red-400">· {d.failedRows} failed</span>}
+                </td>
+                <td className="px-3 py-2.5 font-mono text-xs text-muted">{d.updated ?? "—"}</td>
+                <td className="px-3 py-2.5 font-mono text-xs text-muted">
+                  {d.labeled ? `${d.goldQueries} queries${d.hasReferenceAnswers ? " + answers" : ""}` : "—"}
+                </td>
               </tr>
             );
           })}

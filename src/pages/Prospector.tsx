@@ -8,13 +8,16 @@ import FlowStepper from "@/components/FlowStepper";
 
 
 export default function Prospector() {
-  const { datasets, datasetId, dataset, setDatasetId, setHighlight } = useExplorer();
+  const { datasets, datasetId, dataset, setDatasetId, setHighlight, reportError } = useExplorer();
   const [docs, setDocs] = useState<DocumentSummary[]>([]);
   const navigate = useNavigate();
 
   useEffect(() => {
     let live = true;
-    listDocuments(datasetId).then((d) => live && setDocs(d));
+    if (!datasetId) return;
+    listDocuments(datasetId)
+      .then((d) => live && setDocs(d))
+      .catch((e) => { if (live) { setDocs([]); reportError(String(e.message ?? e)); } });
     return () => { live = false; };
   }, [datasetId]);
 
@@ -32,7 +35,8 @@ export default function Prospector() {
           <h2 className="caption">Data sources</h2>
           <Link to="/" className="btn">Query {dataset?.name ?? "dataset"} in Explorer <ArrowRight size={12} /></Link>
         </div>
-        <ProspectorTable datasets={datasets} activeId={datasetId} onSelect={setDatasetId} />
+        <ProspectorTable datasets={datasets} activeId={datasetId}
+          onSelect={(id) => { if (datasets.find((d) => d.id === id)?.status === "ready") setDatasetId(id); }} />
       </section>
 
       <section className="card">

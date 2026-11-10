@@ -9,6 +9,11 @@ type Ctx = {
   datasetId: string;
   dataset: Dataset | undefined;
   setDatasetId: (id: string) => void;
+  /** re-fetch /datasets (index status changes while a build runs) */
+  refreshDatasets: () => void;
+  /** last backend error (unreachable, 4xx/5xx); null when the last call succeeded */
+  error: string | null;
+  reportError: (msg: string | null) => void;
   highlight: Highlight;
   setHighlight: (h: Highlight) => void;
 
@@ -32,7 +37,8 @@ const ExplorerCtx = createContext<Ctx | null>(null);
 
 export function ExplorerProvider({ children }: { children: ReactNode }) {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [datasetId, setDatasetId] = useState("ds-chat");
+  const [datasetId, setDatasetId] = useState("");
+  const [error, setError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<Highlight>(null);
 
   const [query, setQuery] = useState("");
@@ -45,21 +51,37 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(false);
   const reqId = useRef(0);
 
-  useEffect(() => { listDatasets().then(setDatasets); }, []);
+  const refreshDatasets = useCallback(() => {
+    listDatasets()
+      .then((ds) => {
+        setDatasets(ds);
+        // default to the first ready dataset; keep the user's pick if it still exists
+        setDatasetId((cur) => (cur && ds.some((d) => d.id === cur) ? cur : (ds.find((d) => d.status === "ready") ?? ds[0])?.id ?? ""));
+      })
+      .catch((e) => setError(String(e.message ?? e)));
+  }, []);
+  useEffect(() => { refreshDatasets(); }, [refreshDatasets]);
   useEffect(() => { setResult(null); }, [datasetId]);
 
   // Re-run whenever the query, technique, knobs or dataset change (sliders debounced).
   useEffect(() => {
-    if (!query) return;
+    if (!query || !datasetId) return;
     const id = ++reqId.current;
     const t = window.setTimeout(() => {
       setLoading(true);
-      runRetrieval(datasetId, query, technique, topK, chunkTopK).then((r) => {
-        if (id !== reqId.current) return; // superseded by a newer request
-        setResult(r);
-        setResultKey((k) => k + 1);
-        setLoading(false);
-      });
+      runRetrieval(datasetId, query, technique, topK, chunkTopK)
+        .then((r) => {
+          if (id !== reqId.current) return; // superseded by a newer request
+          setResult(r);
+          setResultKey((k) => k + 1);
+          setError(null);
+        })
+        .catch((e) => {
+          if (id !== reqId.current) return;
+          setResult(null);
+          setError(String(e.message ?? e));
+        })
+        .finally(() => { if (id === reqId.current) setLoading(false); });
     }, 200);
     return () => window.clearTimeout(t);
   }, [datasetId, query, runNonce, technique, topK, chunkTopK]);
@@ -71,11 +93,11 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<Ctx>(() => ({
-    datasets, datasetId, setDatasetId, highlight, setHighlight,
+    datasets, datasetId, setDatasetId, refreshDatasets, error, reportError: setError, highlight, setHighlight,
     dataset: datasets.find((d) => d.id === datasetId),
     query, run, runNonce, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
     result, resultKey, loading,
-  }), [datasets, datasetId, highlight, query, run, runNonce, technique, topK, chunkTopK, result, resultKey, loading]);
+  }), [datasets, datasetId, refreshDatasets, error, highlight, query, run, runNonce, technique, topK, chunkTopK, result, resultKey, loading]);
 
   return <ExplorerCtx.Provider value={value}>{children}</ExplorerCtx.Provider>;
 }

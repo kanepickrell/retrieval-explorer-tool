@@ -12,14 +12,19 @@ const ABOUT =
 /** Dataset is app-wide context (Explorer queries it, Prospector browses it), so it lives in the header. */
 function DatasetPicker() {
   const { datasets, datasetId, setDatasetId } = useExplorer();
+  const label = (d: (typeof datasets)[number]) =>
+    d.status === "ready"
+      ? `${d.name} · ${d.rows} docs${d.labeled ? ` · gold ${d.goldQueries}` : ""}`
+      : `${d.name} · indexing ${d.rows}/${d.expectedRows}`;
   return (
     <label className="relative flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5 text-sm hover:border-muted/50">
       <Database size={14} className="text-muted" />
       <span className="sr-only">Dataset</span>
       <select value={datasetId} onChange={(e) => setDatasetId(e.target.value)}
         className="cursor-pointer appearance-none bg-transparent pr-5 text-ink outline-none">
+        {datasets.length === 0 && <option value="">no datasets</option>}
         {datasets.map((d) => (
-          <option key={d.id} value={d.id} className="bg-surface">{d.name}{d.labeled ? " · gold" : ""}</option>
+          <option key={d.id} value={d.id} disabled={d.status !== "ready"} className="bg-surface">{label(d)}</option>
         ))}
       </select>
       <ChevronDown size={14} className="pointer-events-none absolute right-2 text-muted" />
@@ -69,6 +74,19 @@ function Help() {
   );
 }
 
+/** Shown whenever the last backend call failed: no silent fallback to fake data. */
+function ErrorBanner() {
+  const { error, reportError, refreshDatasets } = useExplorer();
+  if (!error) return null;
+  return (
+    <div role="alert" className="flex w-full items-center gap-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-ink">
+      <span className="font-mono text-xs text-red-400">backend error</span>
+      <span className="min-w-0 flex-1 truncate">{error}</span>
+      <button className="btn" onClick={() => { reportError(null); refreshDatasets(); }}>retry</button>
+    </div>
+  );
+}
+
 export default function Header() {
   const link = ({ isActive }: { isActive: boolean }) =>
     clsx("rounded px-3 py-1 text-sm transition-colors", isActive ? "bg-surface-2 text-ink" : "text-muted hover:text-ink");
@@ -88,6 +106,7 @@ export default function Header() {
       </nav>
       <DatasetPicker />
       <Help />
+      <ErrorBanner />
     </header>
   );
 }

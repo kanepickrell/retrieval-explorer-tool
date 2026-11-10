@@ -23,6 +23,7 @@ from fastapi import APIRouter, Query
 
 from unified_search import analyze_query_intent  # backend-agnostic intent signals
 from retrieval import vector_provider
+import datasets as DS
 
 # kept for main.py back-compat; retrieval no longer depends on it
 _gdb = None
@@ -38,8 +39,8 @@ def init_graph_search(gdb=None):
     _gdb = gdb
 
 
-def run_vector(query: str, limit: int) -> List[Dict]:
-    return vector_provider.search(query, limit)
+def run_vector(query: str, limit: int, storage_dir: str = None) -> List[Dict]:
+    return vector_provider.search(query, limit, storage_dir=storage_dir)
 
 
 router = APIRouter(prefix="/api/search", tags=["Unified Search (corpus RAG)"])
@@ -51,15 +52,19 @@ async def unified_search(
     limit: int = Query(20, le=100),
     force_strategy: Optional[str] = Query(
         None, description="vector (active) | lightrag/keyword/neural (parked)"),
+    dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
+    top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
 ):
     t0 = time.time()
+    ds = DS.get(dataset)
+    sd = str(ds.storage)
     intent = analyze_query_intent(q)
     # vector is the main retrieval now; routing signals are advisory only
     strategy = (force_strategy or "vector").lower()
 
-    note, results, graph = None, [], None
+    note, results, graph, lr_ms = None, [], None, None
     if strategy == "vector":
-        results = run_vector(q, limit)
+        results = run_vector(q, limit, sd)
         if not results:
             note = ("no vector results -- check the embed host "
                     f"({vector_provider.EMBED_HOST}) and corpus storage")
@@ -68,8 +73,9 @@ async def unified_search(
         try:
             from retrieval import lightrag_provider
             lr_mode = "mix" if strategy == "lightrag" else strategy
-            results = await lightrag_provider.search(q, limit, mode=lr_mode)
+            results = await lightrag_provider.search(q, limit, mode=lr_mode, storage_dir=sd, top_k=top_k)
             graph = lightrag_provider.LAST_GRAPH  # subgraph for the retrieval graph UI
+            lr_ms = lightrag_provider.LAST_QUERY_MS
             if not results:
                 note = ("no lightrag results -- check LLM/embed host and storage")
         except Exception as e:
@@ -81,6 +87,7 @@ async def unified_search(
 
     return {
         "query": q,
+        "dataset": ds.id,
         "strategy_used": strategy if (results or strategy == "vector") else "none",
         "intent_analysis": {
             "recommended_strategy": intent.strategy.value,
@@ -89,7 +96,8 @@ async def unified_search(
             "search_terms": intent.search_terms,
         },
         "total_results": len(results),
-        "time_ms": round((time.time() - t0) * 1000, 1),
+        # retrieval time only: for LightRAG modes this excludes waiting behind other queries
+        "time_ms": lr_ms if lr_ms is not None else round((time.time() - t0) * 1000, 1),
         "note": note,
         "graph": graph,  # {nodes, edges} for lightrag strategies, else null
         "results": results,
@@ -101,6 +109,8 @@ async def answer(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(5, le=20, description="chunks/context used for grounding"),
     force_strategy: Optional[str] = Query("vector"),
+    dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
+    top_k: Optional[int] = Query(None, le=200),
 ):
     """Generate a grounded answer for a query under one strategy, using the SAME
     LLM for every mode so only the retrieval differs. Kept separate from /unified
@@ -110,10 +120,11 @@ async def answer(
     """
     t0 = time.time()
     strategy = (force_strategy or "vector").lower()
+    sd = str(DS.get(dataset).storage)
     answer_text, note, used = "", None, 0
     try:
         if strategy == "vector":
-            ctx = vector_provider.contexts(q, limit)
+            ctx = vector_provider.contexts(q, limit, storage_dir=sd)
             used = len(ctx)
             if not ctx:
                 note = "no vector context to ground an answer"
@@ -124,7 +135,7 @@ async def answer(
         elif strategy in LIGHTRAG_ALIASES:
             from retrieval import lightrag_provider
             lr_mode = "mix" if strategy == "lightrag" else strategy
-            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True)
+            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True, storage_dir=sd, top_k=top_k)
             used = len(rows)
             answer_text = lightrag_provider.LAST_ANSWER
             if not answer_text:
@@ -151,6 +162,8 @@ async def evaluate(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(5, le=20, description="chunks used for retrieval + grounding"),
     force_strategy: Optional[str] = Query("vector"),
+    dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
+    top_k: Optional[int] = Query(None, le=200),
 ):
     """Compute real Ragas-style metrics for one query under one strategy. Heavy
     (retrieval + generation + several judge calls), so the UI calls it on demand.
@@ -163,22 +176,24 @@ async def evaluate(
 
     t0 = _t.time()
     strategy = (force_strategy or "vector").lower()
+    ds = DS.get(dataset)
+    sd = str(ds.storage)
     note = None
     answer_text, contexts, retrieved_ids = "", [], []
 
     try:
         if strategy == "vector":
-            ctx = vector_provider.contexts(q, limit)
+            ctx = vector_provider.contexts(q, limit, storage_dir=sd)
             retrieved_ids = [c["title"] for c in ctx]
             contexts = [c["content"] for c in ctx]
             blob = "\n\n".join(f"[{c['title']}]\n{c['content']}" for c in ctx)
             answer_text = await lightrag_provider.generate_over(q, blob) if ctx else ""
         elif strategy in LIGHTRAG_ALIASES:
             lr_mode = "mix" if strategy == "lightrag" else strategy
-            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True)
+            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True, storage_dir=sd, top_k=top_k)
             retrieved_ids = [r["id"] for r in rows]
             answer_text = lightrag_provider.LAST_ANSWER
-            contexts = vector_provider.contents_for(retrieved_ids)
+            contexts = vector_provider.contents_for(retrieved_ids, storage_dir=sd)
         else:
             note = f"'{strategy}' is not evaluable (parked)"
     except Exception as e:
@@ -193,8 +208,16 @@ async def evaluate(
             note = (note or "") + f" | metrics failed: {e!r}"[:120]
 
     # reference-based: recall@k only when the query matches a gold set
-    gold = M.match_gold(q)
+    gold = M.match_gold(q, DS.gold_entries(ds))
     recall = M.recall_at_k(retrieved_ids, gold.get("gold_ids", []), limit) if gold else None
+
+    # reference-based LLM metrics: only when the gold entry carries a reference answer
+    ref_based = {"context_recall": None, "context_entities_recall": None, "noise_sensitivity": None}
+    if gold and gold.get("reference") and contexts:
+        try:
+            ref_based = await M.reference_based(answer_text, gold["reference"], contexts)
+        except Exception as e:
+            note = (note or "") + f" | reference metrics failed: {e!r}"[:120]
 
     def tile(key, label, value, ref):
         return {"key": key, "label": label, "value": value, "reference_based": ref}
@@ -203,13 +226,13 @@ async def evaluate(
         tile("faithfulness", "Faithfulness", ref_free["faithfulness"], False),
         tile("answer_relevancy", "Answer Relevancy", ref_free["answer_relevancy"], False),
         tile("context_precision", "Context Precision", ref_free["context_precision"], False),
-        tile("context_recall", "Context Recall", None, True),
-        tile("context_entities_recall", "Context Entities Recall", None, True),
-        tile("noise_sensitivity", "Noise Sensitivity", None, True),
+        tile("context_recall", "Context Recall", ref_based["context_recall"], True),
+        tile("context_entities_recall", "Context Entities Recall", ref_based["context_entities_recall"], True),
+        tile("noise_sensitivity", "Noise Sensitivity", ref_based["noise_sensitivity"], True),
         tile("recall_at_k", "recall@k", recall, True),
     ]
     return {
-        "query": q, "strategy": strategy,
+        "query": q, "strategy": strategy, "dataset": ds.id,
         "gold_matched": bool(gold), "gold_id": gold.get("id") if gold else None,
         "grounded_chunks": len(contexts),
         "answer_chars": len(answer_text or ""),
@@ -247,5 +270,5 @@ async def corpus_status():
 @router.post("/unified/reindex")
 async def reindex():
     """Drop the cached corpus index so the next query reloads vdb_chunks.json."""
-    vector_provider._INDEX = None
+    vector_provider._INDEX.clear()
     return {"ok": True}

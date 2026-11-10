@@ -12,7 +12,7 @@ const EMPTY = { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
 
 export default function Explorer() {
   const {
-    datasetId, highlight, setHighlight,
+    datasetId, dataset, reportError, highlight, setHighlight,
     query, run, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
     result, resultKey, loading,
   } = useExplorer();
@@ -68,7 +68,10 @@ export default function Explorer() {
 
   useEffect(() => {
     let live = true;
-    getGraph(datasetId).then((g) => live && setGraph(g));
+    if (!datasetId) return;
+    getGraph(datasetId)
+      .then((g) => live && setGraph(g))
+      .catch((e) => { if (live) { setGraph({ nodes: [], edges: [] }); reportError(String(e.message ?? e)); } });
     return () => { live = false; };
   }, [datasetId]);
 
@@ -90,7 +93,7 @@ export default function Explorer() {
   return (
     <main className="mt-5 flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
-        <QuestionCard value={input} onChange={setInput} onRun={run} loading={loading}
+        <QuestionCard samples={dataset?.samples} value={input} onChange={setInput} onRun={run} loading={loading}
           activeQuery={result ? query : ""} inputRef={inputRef} />
         <ModeCard technique={technique} onTechnique={setTechnique} topK={topK} onTopK={setTopK} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
       </div>

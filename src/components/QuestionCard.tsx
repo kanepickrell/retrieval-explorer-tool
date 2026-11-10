@@ -1,7 +1,6 @@
 import type { RefObject } from "react";
 import { Loader2, Search } from "lucide-react";
 import clsx from "clsx";
-import { SAMPLE_QUERIES } from "@/lib/api";
 
 type Props = {
   value: string;
@@ -11,9 +10,11 @@ type Props = {
   /** the query that produced the current result, to mark its chip */
   activeQuery: string;
   inputRef?: RefObject<HTMLInputElement>;
+  /** example queries from the dataset's gold set */
+  samples?: string[];
 };
 
-export default function QuestionCard({ value, onChange, onRun, loading, activeQuery, inputRef }: Props) {
+export default function QuestionCard({ value, onChange, onRun, loading, activeQuery, inputRef, samples = [] }: Props) {
   return (
     <section className="card flex flex-col gap-3">
       <div className="flex items-baseline justify-between">
@@ -28,16 +29,16 @@ export default function QuestionCard({ value, onChange, onRun, loading, activeQu
           {loading ? <Loader2 size={14} className="animate-spin" /> : null} Search
         </button>
       </form>
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="mr-0.5 font-mono text-[11px] text-muted/70">try</span>
-        {SAMPLE_QUERIES.map((q) => (
+      {samples.length > 0 && <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-0.5 font-mono text-[11px] text-muted/70" title="queries from this dataset's gold eval set">try (gold)</span>
+        {samples.map((q) => (
           <button key={q} onClick={() => { onChange(q); onRun(q); }}
             className={clsx("rounded-full border px-2.5 py-0.5 text-left text-xs transition-colors",
               q === activeQuery ? "border-local/60 bg-local/10 text-ink" : "border-line bg-surface-2 text-muted hover:border-muted/50 hover:text-ink")}>
             {q}
           </button>
         ))}
-      </div>
+      </div>}
     </section>
   );
 }

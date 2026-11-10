@@ -49,14 +49,20 @@ def _toks(s: str) -> set:
     return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if w not in _STOP and len(w) > 2}
 
 
-def match_gold(query: str, threshold: float = 0.4) -> Optional[dict]:
-    """Return the best-matching gold entry (by token Jaccard) if the query is a
-    labeled eval query, else None -> reference-based metrics stay 'needs gold'."""
+def match_gold(query: str, entries: Optional[list] = None, threshold: float = 0.4) -> Optional[dict]:
+    """Return the best-matching gold entry if the query is a labeled eval query,
+    else None -> reference-based metrics stay 'needs gold'. An exact (whitespace-
+    normalised) match wins outright; otherwise best token Jaccard >= threshold."""
+    entries = _load_gold() if entries is None else entries
+    norm = lambda s: " ".join((s or "").split()).lower()
+    for e in entries:
+        if norm(e.get("query")) == norm(query):
+            return e
     q = _toks(query)
     if not q:
         return None
     best, best_s = None, 0.0
-    for e in _load_gold():
+    for e in entries:
         g = _toks(e.get("query", ""))
         if not g:
             continue
@@ -168,6 +174,101 @@ async def context_precision(answer: str, contexts: List[str]) -> Optional[float]
             hits += 1
             ap += (hits / k)
     return round(ap / total_rel, 3)
+
+
+# ───────────────────────── reference-based (LLM judge, need gold reference) ─────────────────────────
+
+_REF_CHARS = 6000   # keep reference + contexts inside the judge's context window
+_CTX_CHARS = 2500
+
+
+async def _claims(text: str, limit: int = 15) -> List[str]:
+    out = _json_list(await lp.llm(
+        "Break the TEXT into a list of standalone, verifiable factual statements. "
+        "Return ONLY a JSON array of short strings.\n\nTEXT:\n" + text[:_REF_CHARS],
+        system_prompt="You extract atomic factual statements. Output JSON only."))
+    return [str(c) for c in out if str(c).strip()][:limit]
+
+
+async def _supported(claims: List[str], source: str, source_name: str) -> List[bool]:
+    numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(claims))
+    v = _json_list(await lp.llm(
+        f"For each STATEMENT, decide if it can be directly inferred from the {source_name}. "
+        "Return ONLY a JSON array of booleans, one per statement, in order.\n\n"
+        f"{source_name}:\n{source}\n\nSTATEMENTS:\n{numbered}",
+        system_prompt="You verify statements against a source. Output a JSON array of true/false only."))
+    return [bool(x) for x in v][:len(claims)]
+
+
+def _ctx_blob(contexts: List[str]) -> str:
+    return "\n\n".join(c[:_CTX_CHARS] for c in contexts if c and c.strip())
+
+
+async def context_recall(reference: str, contexts: List[str]) -> Optional[float]:
+    """Ragas context recall: share of the reference's statements that the
+    retrieved context supports."""
+    ctx = _ctx_blob(contexts)
+    if not reference.strip() or not ctx:
+        return None
+    claims = await _claims(reference)
+    if not claims:
+        return None
+    v = await _supported(claims, ctx, "CONTEXT")
+    if not v:
+        return None
+    return round(sum(v) / len(claims), 3)
+
+
+async def context_entities_recall(reference: str, contexts: List[str]) -> Optional[float]:
+    """Ragas context entities recall: |entities(reference) ∩ entities(context)| / |entities(reference)|.
+    Entities are LLM-extracted, then matched case-insensitively."""
+    ctx = _ctx_blob(contexts)
+    if not reference.strip() or not ctx:
+        return None
+    prompt = ("List the named entities (people, organisations, products, tools, files, "
+              "techniques, IDs, places) in the TEXT. Return ONLY a JSON array of strings.\n\nTEXT:\n")
+    sysp = "You extract named entities. Output JSON only."
+    import asyncio
+    ref_e, ctx_e = await asyncio.gather(lp.llm(prompt + reference[:_REF_CHARS], system_prompt=sysp),
+                                        lp.llm(prompt + ctx[:_REF_CHARS * 2], system_prompt=sysp))
+    norm = lambda xs: {re.sub(r"\s+", " ", str(x)).strip().lower() for x in xs if str(x).strip()}
+    ref, got = norm(_json_list(ref_e)), norm(_json_list(ctx_e))
+    if not ref:
+        return None
+    # an entity counts if it appears in the context entity list or verbatim in the context text
+    low = ctx.lower()
+    hit = sum(1 for e in ref if e in got or e in low)
+    return round(hit / len(ref), 3)
+
+
+async def noise_sensitivity(answer: str, reference: str, contexts: List[str]) -> Optional[float]:
+    """Ragas noise sensitivity: share of the answer's claims that are wrong
+    (not supported by the reference) yet supported by the retrieved context,
+    i.e. errors the retrieval led the generator into. Lower is better."""
+    ctx = _ctx_blob(contexts)
+    if not answer.strip() or not reference.strip() or not ctx or _NONCOMMITTAL.search(answer):
+        return None
+    claims = await _claims(answer)
+    if not claims:
+        return None
+    import asyncio
+    by_ref, by_ctx = await asyncio.gather(_supported(claims, reference[:_REF_CHARS], "REFERENCE"),
+                                          _supported(claims, ctx, "CONTEXT"))
+    if not by_ref or not by_ctx:
+        return None
+    n = min(len(by_ref), len(by_ctx))
+    noisy = sum(1 for i in range(n) if not by_ref[i] and by_ctx[i])
+    return round(noisy / n, 3)
+
+
+async def reference_based(answer: str, reference: str, contexts: List[str]) -> Dict[str, Optional[float]]:
+    import asyncio
+    cr, cer, ns = await asyncio.gather(
+        context_recall(reference, contexts),
+        context_entities_recall(reference, contexts),
+        noise_sensitivity(answer, reference, contexts),
+    )
+    return {"context_recall": cr, "context_entities_recall": cer, "noise_sensitivity": ns}
 
 
 # ───────────────────────── reference-based (deterministic) ─────────────────────────

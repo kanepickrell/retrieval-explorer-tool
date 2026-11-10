@@ -19,6 +19,7 @@ Config (env), shared with vector_provider where sensible:
 from __future__ import annotations
 import asyncio
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -37,14 +38,19 @@ LLM = os.getenv("PROTOGRAPH_LLM", "gemma3:12b")
 MODE = os.getenv("PROTOGRAPH_LIGHTRAG_MODE", "mix")
 NUM_CTX = 16384
 
-_RAG = None
+_RAGS: Dict[str, "LightRAG"] = {}          # one LightRAG instance per storage dir
 _SESSION: Optional[aiohttp.ClientSession] = None
 _LOCK: Optional[asyncio.Lock] = None
+# LightRAG's context is captured through a module-level tap (_CUR), so queries
+# must not overlap or one query's subgraph/answer leaks into another's result.
+_QUERY_LOCK: Optional[asyncio.Lock] = None
 _CUR: Dict[str, list] = {"ctx": [], "ents": [], "rels": []}  # per-query capture
 # the subgraph LightRAG touched on the last query, for the retrieval graph UI
 LAST_GRAPH: Dict[str, list] = {"nodes": [], "edges": []}
 # the generated answer from the last query run with generate=True
 LAST_ANSWER: str = ""
+# wall time of the last LightRAG query, excluding time spent waiting for _QUERY_LOCK
+LAST_QUERY_MS: float = 0.0
 
 
 def _title_of(c: dict) -> str:
@@ -99,16 +105,23 @@ def _install_tap():
     op._build_context_str = wrapped
 
 
-async def _ensure_rag():
-    global _RAG, _SESSION, _LOCK
+async def _ensure_session():
+    global _SESSION, _LOCK, _QUERY_LOCK
     if _LOCK is None:
         _LOCK = asyncio.Lock()
-    async with _LOCK:
-        if _RAG is not None:
-            return _RAG
+        _QUERY_LOCK = asyncio.Lock()
+    if _SESSION is None or _SESSION.closed:
         _SESSION = aiohttp.ClientSession()
+
+
+async def _ensure_rag(storage_dir: str = None):
+    await _ensure_session()
+    key = str(storage_dir or STORAGE_DIR)
+    async with _LOCK:
+        if key in _RAGS:
+            return _RAGS[key]
         rag = LightRAG(
-            working_dir=str(STORAGE_DIR),
+            working_dir=key,
             llm_model_func=_ollama_llm, llm_model_name=LLM,
             embedding_func=EmbeddingFunc(embedding_dim=768, max_token_size=2048,
                                          func=_ollama_embed, model_name=EMBED),
@@ -117,30 +130,41 @@ async def _ensure_rag():
         )
         await rag.initialize_storages()
         _install_tap()
-        _RAG = rag
-        return _RAG
+        _RAGS[key] = rag
+        return rag
 
 
 def status() -> Dict:
     return {"storage_dir": STORAGE_DIR, "embed_host": HOST, "embed_model": EMBED,
-            "llm": LLM, "mode": MODE, "initialized": _RAG is not None}
+            "llm": LLM, "mode": MODE, "loaded": sorted(_RAGS)}
 
 
-async def search(query: str, limit: int = 20, mode: str = None, generate: bool = False) -> List[Dict]:
+async def search(query: str, limit: int = 20, mode: str = None, generate: bool = False,
+                 storage_dir: str = None, top_k: int = None) -> List[Dict]:
     """Run LightRAG retrieval and return the selected doc titles as unified rows,
     deduped preserving LightRAG's order (rank = order).
 
     With generate=True, LightRAG also writes a grounded answer (over THIS mode's
     graph+chunk context) into the module global LAST_ANSWER. The context tap fires
     either way, so the touched subgraph (LAST_GRAPH) is captured regardless."""
+    global LAST_QUERY_MS
+    rag = await _ensure_rag(storage_dir)
+    async with _QUERY_LOCK:
+        t0 = time.perf_counter()  # timed inside the lock: excludes queue wait behind other queries
+        try:
+            return await _search_locked(rag, query, limit, mode, generate, top_k)
+        finally:
+            LAST_QUERY_MS = round((time.perf_counter() - t0) * 1000, 1)
+
+
+async def _search_locked(rag, query, limit, mode, generate, top_k) -> List[Dict]:
     global LAST_GRAPH, LAST_ANSWER
-    rag = await _ensure_rag()
     _CUR["ctx"], _CUR["ents"], _CUR["rels"] = [], [], []
     LAST_GRAPH = {"nodes": [], "edges": []}
     LAST_ANSWER = ""
     try:
         ans = await rag.aquery(query, param=QueryParam(
-            mode=mode or MODE, top_k=max(20, limit), chunk_top_k=limit,
+            mode=mode or MODE, top_k=top_k or max(20, limit), chunk_top_k=limit,
             max_total_tokens=12000, enable_rerank=False,
             only_need_context=not generate))
         if generate and isinstance(ans, str):
@@ -181,13 +205,13 @@ _GEN_SYS = (
 async def llm(prompt: str, system_prompt: str = None) -> str:
     """Public one-shot LLM call on the same model the graph modes use. For the
     metrics judge, so Ragas-style scores use the same gemma3 as generation."""
-    await _ensure_rag()
+    await _ensure_session()
     return await _ollama_llm(prompt, system_prompt=system_prompt)
 
 
 async def embed(texts, as_query: bool = False):
     """Public embedding call (nomic). Returns an (n, dim) float32 np.array."""
-    await _ensure_rag()
+    await _ensure_session()
     return await _ollama_embed(list(texts), context="query" if as_query else "document")
 
 
@@ -195,7 +219,7 @@ async def generate_over(query: str, context_text: str) -> str:
     """Naive-RAG generation: answer a query grounded in the given context text,
     using the SAME LLM the graph modes use (so answers are comparable across
     techniques). Used for the `vector` strategy, which has no graph context."""
-    await _ensure_rag()  # ensures _SESSION + model are up
+    await _ensure_session()
     if not context_text.strip():
         return ""
     prompt = (f"Context:\n{context_text}\n\n"

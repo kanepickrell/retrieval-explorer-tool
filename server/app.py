@@ -33,13 +33,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from graph_search import init_graph_search, router as search_router  # noqa: E402
-
-STORAGE = Path(os.getenv("PROTOGRAPH_CORPUS_STORAGE", r"C:\repos\lightrag-explainer\agenthub_storage"))
-GRAPHML = STORAGE / "graph_chunk_entity_relation.graphml"
+import datasets as DS  # noqa: E402
 
 app = FastAPI(title="Retrieval Explorer backend")
 app.add_middleware(
@@ -48,17 +46,22 @@ app.add_middleware(
 init_graph_search(None)          # retrieval is corpus-backed; no GraphDB handle needed
 app.include_router(search_router)  # mounts /api/search/unified and friends
 
-_GRAPH_CACHE: dict | None = None
+_GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 
 
-def _load_corpus_graph() -> dict:
-    """Read the LightRAG graphml into the frontend's {nodes, edges} shape."""
-    global _GRAPH_CACHE
-    if _GRAPH_CACHE is not None:
-        return _GRAPH_CACHE
+def _load_corpus_graph(dataset: str | None = None) -> dict:
+    """Read a dataset's LightRAG graphml into the frontend's {nodes, edges} shape.
+    Cached per file, reloaded when the file changes (e.g. after a re-index)."""
+    graphml = DS.get(dataset).storage / "graph_chunk_entity_relation.graphml"
+    if not graphml.exists():
+        raise HTTPException(404, f"no graph for dataset '{dataset}' (index not built yet)")
+    mtime = graphml.stat().st_mtime
+    hit = _GRAPH_CACHE.get(str(graphml))
+    if hit and hit[0] == mtime:
+        return hit[1]
     import networkx as nx
 
-    G = nx.read_graphml(GRAPHML)
+    G = nx.read_graphml(graphml)
     deg = dict(G.degree())
     nodes = []
     for n, d in G.nodes(data=True):
@@ -83,28 +86,40 @@ def _load_corpus_graph() -> dict:
             "weight": w, "type": "RELATED",
             "label": (d.get("keywords") or d.get("description") or "")[:60],
         })
-    _GRAPH_CACHE = {"nodes": nodes, "edges": edges}
-    return _GRAPH_CACHE
+    g = {"nodes": nodes, "edges": edges}
+    _GRAPH_CACHE[str(graphml)] = (mtime, g)
+    return g
+
+
+@app.get("/datasets")
+def datasets():
+    """Every corpus the backend can serve, with index status and gold-set info."""
+    return DS.list_all()
+
+
+@app.get("/documents")
+def documents(dataset: str | None = Query(None)):
+    return DS.documents(DS.get(dataset))
 
 
 @app.get("/graph")
-def graph():
-    return _load_corpus_graph()
+def graph(dataset: str | None = Query(None)):
+    return _load_corpus_graph(dataset)
 
 
 @app.get("/api/graph/stats")
-def graph_stats():
-    g = _load_corpus_graph()
-    return {"nodes": len(g["nodes"]), "edges": len(g["edges"]), "source": "agenthub corpus (LightRAG)"}
+def graph_stats(dataset: str | None = Query(None)):
+    g = _load_corpus_graph(dataset)
+    return {"dataset": DS.get(dataset).id, "nodes": len(g["nodes"]), "edges": len(g["edges"])}
 
 
 @app.get("/")
 def root():
     return {
         "ok": True,
-        "graph": "/graph",
-        "search": "/api/search/unified?q=...&force_strategy=vector",
-        "storage": str(STORAGE),
+        "datasets": "/datasets",
+        "graph": "/graph?dataset=<id>",
+        "search": "/api/search/unified?q=...&force_strategy=vector&dataset=<id>",
     }
 
 
