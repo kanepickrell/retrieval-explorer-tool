@@ -55,8 +55,10 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
     listDatasets()
       .then((ds) => {
         setDatasets(ds);
-        // default to the first ready dataset; keep the user's pick if it still exists
-        setDatasetId((cur) => (cur && ds.some((d) => d.id === cur) ? cur : (ds.find((d) => d.status === "ready") ?? ds[0])?.id ?? ""));
+        // keep the user's pick if it still exists; otherwise default to the most recently
+        // updated ready dataset (a freshly built export, not the old synthetic corpus)
+        const ready = ds.filter((d) => d.status === "ready").sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? ""));
+        setDatasetId((cur) => (cur && ds.some((d) => d.id === cur) ? cur : (ready[0] ?? ds[0])?.id ?? ""));
       })
       .catch((e) => setError(String(e.message ?? e)));
   }, []);
