@@ -19,11 +19,12 @@ from __future__ import annotations
 import time
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from unified_search import analyze_query_intent  # backend-agnostic intent signals
 from retrieval import vector_provider
 import datasets as DS
+import runs as RUNS
 
 # kept for main.py back-compat; retrieval no longer depends on it
 _gdb = None
@@ -51,21 +52,26 @@ async def unified_search(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(20, le=100),
     force_strategy: Optional[str] = Query(
-        None, description="vector (active) | lightrag/keyword/neural (parked)"),
+        None, description="vector | local | global | hybrid | mix"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
     top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
 ):
+    """Retrieve under one strategy and store the result as a run. Returns run_id:
+    /answer and /metrics take it, so they work on exactly this retrieval."""
     t0 = time.time()
     ds = DS.get(dataset)
     sd = str(ds.storage)
     intent = analyze_query_intent(q)
-    # vector is the main retrieval now; routing signals are advisory only
     strategy = (force_strategy or "vector").lower()
 
     note, results, graph, lr_ms, steps = None, [], None, None, []
+    contexts, context_text, system_prompt = [], "", None
     if strategy == "vector":
         results = run_vector(q, limit, sd)
         steps = vector_provider.LAST_STEPS
+        contexts = [r.pop("content", "") for r in results]
+        # exactly the context naive RAG generates over
+        context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
         if not results:
             note = ("no vector results -- check the embed host "
                     f"({vector_provider.EMBED_HOST}) and corpus storage")
@@ -78,6 +84,9 @@ async def unified_search(
             graph = lightrag_provider.LAST_GRAPH  # subgraph for the retrieval graph UI
             lr_ms = lightrag_provider.LAST_QUERY_MS
             steps = lightrag_provider.LAST_STEPS
+            contexts = lightrag_provider.LAST_CONTEXT_CHUNKS
+            system_prompt = lightrag_provider.LAST_PROMPT
+            context_text = system_prompt or ""
             if not results:
                 note = lightrag_provider.LAST_ERROR or "lightrag returned no context for this query"
         except Exception as e:
@@ -87,7 +96,14 @@ async def unified_search(
     else:
         note = f"unknown strategy '{strategy}', use vector"
 
+    # retrieval time only: for LightRAG modes this excludes waiting behind other queries
+    retrieval_ms = lr_ms if lr_ms is not None else round((time.time() - t0) * 1000, 1)
+    run = RUNS.new_run(dataset=ds.id, query=q, strategy=strategy, limit=limit, top_k=top_k,
+                       retrieved_ids=[r["id"] for r in results], contexts=contexts,
+                       context_text=context_text, system_prompt=system_prompt,
+                       retrieval_ms=retrieval_ms)
     return {
+        "run_id": run.id,
         "query": q,
         "dataset": ds.id,
         "strategy_used": strategy if (results or strategy == "vector") else "none",
@@ -98,8 +114,7 @@ async def unified_search(
             "search_terms": intent.search_terms,
         },
         "total_results": len(results),
-        # retrieval time only: for LightRAG modes this excludes waiting behind other queries
-        "time_ms": lr_ms if lr_ms is not None else round((time.time() - t0) * 1000, 1),
+        "time_ms": retrieval_ms,
         "note": note,
         "graph": graph,  # {nodes, edges} for lightrag strategies, else null
         "steps": steps,  # measured pipeline stages: [{label, detail, stat, ms}]
@@ -107,114 +122,76 @@ async def unified_search(
     }
 
 
-@router.get("/answer")
-async def answer(
-    q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(5, le=20, description="chunks/context used for grounding"),
-    force_strategy: Optional[str] = Query("vector"),
-    dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
-    top_k: Optional[int] = Query(None, le=200),
-):
-    """Generate a grounded answer for a query under one strategy, using the SAME
-    LLM for every mode so only the retrieval differs. Kept separate from /unified
-    so the graph + chunks render instantly while this (slower) call streams in.
-      vector  -> naive RAG: generate over the dense-retrieved chunk texts.
-      lightrag-> LightRAG generates over that mode's graph+chunk context.
-    """
-    t0 = time.time()
-    strategy = (force_strategy or "vector").lower()
-    sd = str(DS.get(dataset).storage)
-    answer_text, note, used = "", None, 0
-    try:
-        if strategy == "vector":
-            ctx = vector_provider.contexts(q, limit, storage_dir=sd)
-            used = len(ctx)
-            if not ctx:
-                note = "no vector context to ground an answer"
-            else:
-                from retrieval import lightrag_provider
-                blob = "\n\n".join(f"[{c['title']}]\n{c['content']}" for c in ctx)
-                answer_text = await lightrag_provider.generate_over(q, blob)
-        elif strategy in LIGHTRAG_ALIASES:
-            from retrieval import lightrag_provider
-            lr_mode = "mix" if strategy == "lightrag" else strategy
-            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True, storage_dir=sd, top_k=top_k)
-            used = len(rows)
-            answer_text = lightrag_provider.LAST_ANSWER
-            if not answer_text:
-                note = "lightrag returned no answer -- check LLM host"
-        elif strategy in PARKED:
-            note = f"'{strategy}' is parked (needs GraphDB/SPARQL)"
-        else:
-            note = f"unknown strategy '{strategy}'"
-    except Exception as e:
-        note = f"generation failed: {e!r}"[:160]
+def _get_run(run_id: str):
+    run = RUNS.get(run_id)
+    if run is None:
+        # never silently re-retrieve: the caller must re-run retrieval so what is
+        # evaluated is what is shown
+        raise HTTPException(404, f"run '{run_id}' not found (backend restarted or run expired) -- re-run the search")
+    return run
 
+
+async def _ensure_answer(run) -> None:
+    """Generate the run's answer once, over the run's stored context, and cache it."""
+    if run.answer is not None:
+        return
+    from retrieval import lightrag_provider
+    t0 = time.time()
+    try:
+        if not run.retrieved_ids:
+            run.answer, run.answer_note = "", "nothing was retrieved, so there is nothing to ground an answer in"
+        elif run.system_prompt:
+            # LightRAG modes: the exact prompt LightRAG built for this context
+            run.answer = await lightrag_provider.generate_from_prompt(run.query, run.system_prompt)
+        else:
+            # vector: naive RAG over the retrieved chunks
+            run.answer = await lightrag_provider.generate_over(run.query, run.context_text)
+        if not run.answer and not run.answer_note:
+            run.answer_note = "LLM returned an empty answer -- check the LLM host"
+    except Exception as e:
+        run.answer, run.answer_note = "", f"generation failed: {e!r}"[:160]
+    run.answer_ms = round((time.time() - t0) * 1000, 1)
+
+
+@router.get("/answer")
+async def answer(run_id: str = Query(..., description="run_id from /unified")):
+    """Generate (once) and return the answer for a stored retrieval run."""
+    run = _get_run(run_id)
+    await _ensure_answer(run)
     return {
-        "query": q,
-        "strategy": strategy,
-        "answer": answer_text,
-        "grounded_chunks": used,
-        "time_ms": round((time.time() - t0) * 1000, 1),
-        "note": note,
+        "run_id": run.id, "query": run.query, "strategy": run.strategy,
+        "answer": run.answer,
+        "grounded_chunks": len(run.contexts),
+        "time_ms": run.answer_ms,
+        "note": run.answer_note,
     }
 
 
 @router.get("/metrics")
-async def evaluate(
-    q: str = Query(..., min_length=1, description="Search query"),
-    limit: int = Query(5, le=20, description="chunks used for retrieval + grounding"),
-    force_strategy: Optional[str] = Query("vector"),
-    dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
-    top_k: Optional[int] = Query(None, le=200),
-):
-    """Compute real Ragas-style metrics for one query under one strategy. Heavy
-    (retrieval + generation + several judge calls), so the UI calls it on demand.
-    Reference-free metrics (faithfulness, answer relevancy, context precision) are
-    computed for any query; reference-based ones need gold and otherwise report
-    pending (value null)."""
-    import time as _t
+async def evaluate(run_id: str = Query(..., description="run_id from /unified")):
+    """Ragas-style metrics for a stored run: its retrieved contexts and its answer
+    (the same answer /answer returns). Reference-free metrics are computed for any
+    query; reference-based ones need the query in the dataset's gold set and
+    otherwise report pending (value null)."""
     import metrics as M
-    from retrieval import lightrag_provider
 
-    t0 = _t.time()
-    strategy = (force_strategy or "vector").lower()
-    ds = DS.get(dataset)
-    sd = str(ds.storage)
-    note = None
-    answer_text, contexts, retrieved_ids = "", [], []
+    run = _get_run(run_id)
+    t0 = time.time()
+    await _ensure_answer(run)
+    ds = DS.get(run.dataset)
+    note = run.answer_note
+    answer_text, contexts = run.answer or "", run.contexts
 
-    try:
-        if strategy == "vector":
-            ctx = vector_provider.contexts(q, limit, storage_dir=sd)
-            retrieved_ids = [c["title"] for c in ctx]
-            contexts = [c["content"] for c in ctx]
-            blob = "\n\n".join(f"[{c['title']}]\n{c['content']}" for c in ctx)
-            answer_text = await lightrag_provider.generate_over(q, blob) if ctx else ""
-        elif strategy in LIGHTRAG_ALIASES:
-            lr_mode = "mix" if strategy == "lightrag" else strategy
-            rows = await lightrag_provider.search(q, limit, mode=lr_mode, generate=True, storage_dir=sd, top_k=top_k)
-            retrieved_ids = [r["id"] for r in rows]
-            answer_text = lightrag_provider.LAST_ANSWER
-            contexts = vector_provider.contents_for(retrieved_ids, storage_dir=sd)
-        else:
-            note = f"'{strategy}' is not evaluable (parked)"
-    except Exception as e:
-        note = f"evaluation setup failed: {e!r}"[:160]
-
-    # reference-free metrics (any query)
     ref_free = {"faithfulness": None, "answer_relevancy": None, "context_precision": None}
     if answer_text and contexts:
         try:
-            ref_free = await M.reference_free(q, answer_text, contexts)
+            ref_free = await M.reference_free(run.query, answer_text, contexts, grounding=run.context_text or None)
         except Exception as e:
             note = (note or "") + f" | metrics failed: {e!r}"[:120]
 
-    # reference-based: recall@k only when the query matches a gold set
-    gold = M.match_gold(q, DS.gold_entries(ds))
-    recall = M.recall_at_k(retrieved_ids, gold.get("gold_ids", []), limit) if gold else None
+    gold = M.match_gold(run.query, DS.gold_entries(ds))
+    recall = M.recall_at_k(run.retrieved_ids, gold.get("gold_ids", []), run.limit) if gold else None
 
-    # reference-based LLM metrics: only when the gold entry carries a reference answer
     ref_based = {"context_recall": None, "context_entities_recall": None, "noise_sensitivity": None}
     if gold and gold.get("reference") and contexts:
         try:
@@ -235,11 +212,11 @@ async def evaluate(
         tile("recall_at_k", "recall@k", recall, True),
     ]
     return {
-        "query": q, "strategy": strategy, "dataset": ds.id,
+        "run_id": run.id, "query": run.query, "strategy": run.strategy, "dataset": ds.id,
         "gold_matched": bool(gold), "gold_id": gold.get("id") if gold else None,
         "grounded_chunks": len(contexts),
-        "answer_chars": len(answer_text or ""),
-        "time_ms": round((_t.time() - t0) * 1000, 1),
+        "answer": answer_text,
+        "time_ms": round((time.time() - t0) * 1000, 1),
         "note": note or None,
         "metrics": out_metrics,
     }

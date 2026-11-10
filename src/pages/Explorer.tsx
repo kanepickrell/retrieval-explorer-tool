@@ -28,8 +28,8 @@ export default function Explorer() {
   const answerReq = useRef(0);                       // guards against superseded responses
   const answerCache = useRef(new Map<string, string>()); // generated answer per run
 
-  // identifies the answer for the current run; changes when the question, technique or knobs change
-  const answerKey = result ? `${query}:::${technique}:::${topK}:::${chunkTopK}:::${resultKey}` : "";
+  // the backend run the answer + metrics belong to: every retrieval is a new run
+  const answerKey = result?.runId ?? "";
 
   // Generate the answer lazily — only when the Answer tab is open, once per run (cached).
   // Generation is a slow LLM call (global/hybrid ~7-8s), so retrieval never waits on it, and a
@@ -40,7 +40,7 @@ export default function Explorer() {
     if (cached !== undefined) { setAnswer({ key: answerKey, text: cached }); setAnswerLoading(false); return; }
     const id = ++answerReq.current;
     setAnswerLoading(true);
-    generateAnswer(datasetId, query, technique, chunkTopK).then((r) => {
+    generateAnswer(answerKey).then((r) => {
       const text = r.answer || (r.note ? `_${r.note}_` : "_No answer was generated._");
       answerCache.current.set(answerKey, text);       // cache even if the view moved on
       if (id !== answerReq.current) return;            // a newer request superseded this one
@@ -50,7 +50,7 @@ export default function Explorer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, answerKey]);
 
-  // Ragas metrics: computed on demand (expensive: retrieval + generation + judge calls).
+  // Ragas metrics: computed on demand for the displayed run (several LLM judge calls).
   const [evalState, setEvalState] = useState<{ key: string; metrics: Metric[] } | null>(null);
   const [evalLoading, setEvalLoading] = useState(false);
   const evalReq = useRef(0);
@@ -59,12 +59,15 @@ export default function Explorer() {
     const key = answerKey;
     const id = ++evalReq.current;
     setEvalLoading(true);
-    evaluate(datasetId, query, technique, topK, chunkTopK).then((r) => {
+    evaluate(key).then((r) => {
+      // the metrics scored this exact answer; show it in the Answer tab too
+      if (r.answer) answerCache.current.set(key, r.answer);
       if (id !== evalReq.current) return;
+      if (r.note && !r.metrics.length) reportError(r.note);
       setEvalState({ key, metrics: r.metrics });
       setEvalLoading(false);
     });
-  }, [result, answerKey, datasetId, query, technique, topK, chunkTopK]);
+  }, [result, answerKey, reportError]);
 
   useEffect(() => {
     let live = true;

@@ -284,13 +284,16 @@ def recall_at_k(retrieved_ids: List[str], gold_ids: List[str], k: int) -> float:
 
 # ───────────────────────── orchestrator ─────────────────────────
 
-async def reference_free(query: str, answer: str, contexts: List[str]) -> Dict[str, Optional[float]]:
+async def reference_free(query: str, answer: str, contexts: List[str],
+                         grounding: Optional[str] = None) -> Dict[str, Optional[float]]:
     """Compute the three reference-free metrics. Each may be None if it couldn't
     be computed (empty answer, judge parse failure); the caller renders None as
     'needs gold'/'—' rather than a fabricated number."""
     import asyncio
     f, ar, cp = await asyncio.gather(
-        faithfulness(answer, contexts),
+        # faithfulness checks against everything the generator saw (for LightRAG
+        # that includes entity/relation descriptions, not just chunks)
+        faithfulness(answer, [grounding] if grounding else contexts),
         answer_relevancy(query, answer),
         context_precision(answer, contexts),
     )

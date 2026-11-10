@@ -116,7 +116,10 @@ export default function Compare() {
     for (const t of TECHNIQUES) {
       if (id !== evalRun.current) return; // query changed mid-run
       setEvaluating(t);
-      const r = await evaluate(datasetId, query, t, topK, chunkTopK);
+      const runId = rawRuns[t]?.runId;
+      if (!runId) continue;
+      // scores the exact retrieval shown in this column (same run id)
+      const r = await evaluate(runId);
       if (id !== evalRun.current) return;
       if (r.metrics.length) setEvals((e) => ({ ...e, [t]: r.metrics }));
       if (r.note) setEvalNotes((n) => ({ ...n, [t]: r.note }));

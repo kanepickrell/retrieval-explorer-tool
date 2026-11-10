@@ -53,8 +53,11 @@ LAST_GRAPH: Dict[str, list] = {"nodes": [], "edges": []}
 LAST_STEPS: List[Dict] = []
 # error from the last query, if LightRAG raised (surfaced instead of "0 results")
 LAST_ERROR: Optional[str] = None
-# the generated answer from the last query run with generate=True
-LAST_ANSWER: str = ""
+# the answer prompt LightRAG built for the last query (system prompt incl. the full
+# KG + chunk context), and the chunk texts in that context -- stored on the run so
+# the answer is generated over exactly what retrieval returned
+LAST_PROMPT: Optional[str] = None
+LAST_CONTEXT_CHUNKS: List[str] = []
 # wall time of the last LightRAG query, excluding time spent waiting for _QUERY_LOCK
 LAST_QUERY_MS: float = 0.0
 
@@ -161,7 +164,7 @@ _MODE_SEARCH = {
 }
 
 
-def _build_steps(mode: str, top_k: int, chunk_top_k: int, total_ms: float, generate: bool) -> List[Dict]:
+def _build_steps(mode: str, top_k: int, chunk_top_k: int, total_ms: float) -> List[Dict]:
     """Turn the trace of one real LightRAG query into UI steps. Every stat and
     timing here was measured on this query; nothing is reconstructed."""
     ms = _TRACE.get("ms", {})
@@ -195,10 +198,7 @@ def _build_steps(mode: str, top_k: int, chunk_top_k: int, total_ms: float, gener
          "ms": ms.get("_build_context_str")},
     ]
     staged = sum(v for v in ms.values() if v)
-    if generate:
-        steps.append({"label": "Generate answer (LLM)", "detail": "LightRAG answer prompt over the final context",
-                      "stat": "", "ms": round(max(0.0, total_ms - staged), 1)})
-    elif total_ms - staged > 50:
+    if total_ms - staged > 50:
         steps.append({"label": "Other", "detail": "LightRAG overhead outside the traced stages",
                       "stat": "", "ms": round(total_ms - staged, 1)})
     return steps
@@ -238,13 +238,14 @@ def status() -> Dict:
             "llm": LLM, "mode": MODE, "loaded": sorted(_RAGS)}
 
 
-async def search(query: str, limit: int = 20, mode: str = None, generate: bool = False,
+async def search(query: str, limit: int = 20, mode: str = None,
                  storage_dir: str = None, top_k: int = None) -> List[Dict]:
     """Run LightRAG retrieval and return the selected doc titles as unified rows,
     deduped preserving LightRAG's order (rank = order).
 
-    With generate=True, LightRAG also writes a grounded answer (over THIS mode's
-    graph+chunk context) into the module global LAST_ANSWER. The context tap fires
+    Also captures LightRAG's rendered answer prompt (LAST_PROMPT) and the final
+    context chunks (LAST_CONTEXT_CHUNKS) so the answer can be generated later over
+    exactly this context. The context tap fires
     either way, so the touched subgraph (LAST_GRAPH) is captured regardless."""
     global LAST_QUERY_MS, LAST_STEPS
     rag = await _ensure_rag(storage_dir)
@@ -253,10 +254,10 @@ async def search(query: str, limit: int = 20, mode: str = None, generate: bool =
     async with _QUERY_LOCK:
         t0 = time.perf_counter()  # timed inside the lock: excludes queue wait behind other queries
         try:
-            rows = await _search_locked(rag, query, limit, mode, generate, top_k)
+            rows = await _search_locked(rag, query, limit, mode, top_k)
         finally:
             LAST_QUERY_MS = round((time.perf_counter() - t0) * 1000, 1)
-        LAST_STEPS = _build_steps(mode, top_k, limit, LAST_QUERY_MS, generate)
+        LAST_STEPS = _build_steps(mode, top_k, limit, LAST_QUERY_MS)
     # real relevance: cosine(query, chunk) with the same embeddings vector mode
     # uses, so scores are comparable across techniques (computed outside the timing)
     if rows:
@@ -267,20 +268,25 @@ async def search(query: str, limit: int = 20, mode: str = None, generate: bool =
     return rows
 
 
-async def _search_locked(rag, query, limit, mode, generate, top_k) -> List[Dict]:
-    global LAST_GRAPH, LAST_ANSWER, LAST_ERROR
+async def _search_locked(rag, query, limit, mode, top_k) -> List[Dict]:
+    global LAST_GRAPH, LAST_PROMPT, LAST_CONTEXT_CHUNKS, LAST_ERROR
     _CUR["ctx"], _CUR["ents"], _CUR["rels"], _CUR["chunks"] = [], [], [], []
     _TRACE.clear()
     LAST_GRAPH = {"nodes": [], "edges": []}
-    LAST_ANSWER = ""
+    LAST_PROMPT, LAST_CONTEXT_CHUNKS = None, []
     LAST_ERROR = None
     try:
+        # only_need_prompt: build the context AND LightRAG's full answer prompt,
+        # without calling the LLM -- same cost as only_need_context
         ans = await rag.aquery(query, param=QueryParam(
             mode=mode, top_k=top_k, chunk_top_k=limit,
             max_total_tokens=12000, enable_rerank=False,
-            only_need_context=not generate))
-        if generate and isinstance(ans, str):
-            LAST_ANSWER = ans
+            only_need_prompt=True))
+        prompt = ans if isinstance(ans, str) else getattr(ans, "content", None)
+        if prompt:
+            # kg_query renders "<system prompt>\n\n---User Query---\n\n<query>"
+            LAST_PROMPT = prompt.rsplit("\n\n---User Query---\n\n", 1)[0]
+        LAST_CONTEXT_CHUNKS = [c.get("content") or "" for c in _CUR["chunks"]]
     except Exception as e:
         LAST_ERROR = f"lightrag query failed: {e!r}"[:200]
         return []
@@ -335,6 +341,13 @@ async def embed(texts, as_query: bool = False):
     """Public embedding call (nomic). Returns an (n, dim) float32 np.array."""
     await _ensure_session()
     return await _ollama_embed(list(texts), context="query" if as_query else "document")
+
+
+async def generate_from_prompt(query: str, system_prompt: str) -> str:
+    """Answer exactly as LightRAG's kg_query would: its rendered system prompt
+    (template + this run's context) and the raw query as the user message."""
+    await _ensure_session()
+    return await _ollama_llm(query, system_prompt=system_prompt)
 
 
 async def generate_over(query: str, context_text: str) -> str:

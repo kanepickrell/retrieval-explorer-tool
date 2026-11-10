@@ -31,6 +31,8 @@ export type Chunk = {
 };
 export type Metric = { key: string; label: string; value: number; referenceBased: boolean; pending?: boolean };
 export type RetrievalResult = {
+  /** backend run id: answer + metrics are computed on exactly this retrieval */
+  runId: string;
   strategy: Technique; timeMs: number;
   graph: { nodes: GraphNode[]; edges: GraphEdge[] }; // touched subgraph; empty for vector
   chunks: Chunk[]; steps: Step[]; answer: string; metrics: Metric[];
@@ -170,6 +172,7 @@ function mapResult(d: any, technique: Technique, _topK: number, chunkTopK: numbe
     ms: typeof st.ms === "number" ? Math.round(st.ms) : undefined,
   }));
   return {
+    runId: String(d?.run_id ?? ""),
     strategy: technique, timeMs, graph: { nodes, edges }, chunks, steps, answer: "", metrics: pendingMetrics(),
     note: d?.note ? String(d.note) : undefined,
   };
@@ -187,14 +190,14 @@ const RAGAS: [string, string, boolean][] = [
 const pendingMetrics = (): Metric[] =>
   RAGAS.map(([key, label, referenceBased]) => ({ key, label, referenceBased, value: 0, pending: true }));
 
-/** Generate a grounded answer for the current query under one technique. Kept
- *  separate from runRetrieval so the graph + chunks render instantly and this
- *  (slower, LLM) call is only made when the Answer tab is viewed. */
+/** Generate (once, cached by the backend) the grounded answer for a retrieval run,
+ *  over exactly that run's context. Kept separate from runRetrieval so the graph +
+ *  chunks render instantly and this slow LLM call only happens when needed. */
 export async function generateAnswer(
-  datasetId: string, query: string, technique: Technique, limit = 5, topK?: number,
+  runId: string,
 ): Promise<{ answer: string; timeMs: number; groundedChunks: number; note?: string }> {
   try {
-    const d = await getJson("/api/search/answer", { q: query, limit, top_k: topK, force_strategy: technique, dataset: datasetId });
+    const d = await getJson("/api/search/answer", { run_id: runId });
     return {
       answer: String(d.answer ?? ""),
       timeMs: Math.round(Number(d.time_ms ?? 0)),
@@ -206,17 +209,15 @@ export async function generateAnswer(
   }
 }
 
-/** Compute real Ragas-style metrics for the current run under one technique.
- *  Heavy (retrieval + generation + judge calls), so it's triggered on demand.
- *  A metric with no computable value comes back pending (e.g. reference-based
- *  metrics for a query that isn't in the dataset's gold set). */
+/** Ragas-style metrics for a retrieval run: its retrieved contexts and its answer
+ *  (the same one generateAnswer returns). Heavy (several LLM judge calls), so it's
+ *  triggered on demand. A metric with no computable value comes back pending (e.g.
+ *  reference-based metrics for a query that isn't in the dataset's gold set). */
 export async function evaluate(
-  datasetId: string, query: string, technique: Technique, topK: number, chunkTopK: number,
-): Promise<{ metrics: Metric[]; goldMatched: boolean; timeMs: number; note?: string }> {
+  runId: string,
+): Promise<{ metrics: Metric[]; answer: string; goldMatched: boolean; timeMs: number; note?: string }> {
   try {
-    const d = await getJson("/api/search/metrics", {
-      q: query, limit: chunkTopK, top_k: topK, force_strategy: technique, dataset: datasetId,
-    });
+    const d = await getJson("/api/search/metrics", { run_id: runId });
     const metrics: Metric[] = (d.metrics ?? []).map((m: any) => ({
       key: String(m.key),
       label: String(m.label),
@@ -224,8 +225,11 @@ export async function evaluate(
       value: typeof m.value === "number" ? m.value : 0,
       pending: m.value === null || m.value === undefined,
     }));
-    return { metrics, goldMatched: !!d.gold_matched, timeMs: Math.round(Number(d.time_ms ?? 0)), note: d.note ? String(d.note) : undefined };
+    return {
+      metrics, answer: String(d.answer ?? ""), goldMatched: !!d.gold_matched,
+      timeMs: Math.round(Number(d.time_ms ?? 0)), note: d.note ? String(d.note) : undefined,
+    };
   } catch (err) {
-    return { metrics: [], goldMatched: false, timeMs: 0, note: `metrics failed: ${(err as Error).message}` };
+    return { metrics: [], answer: "", goldMatched: false, timeMs: 0, note: `metrics failed: ${(err as Error).message}` };
   }
 }

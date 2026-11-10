@@ -139,6 +139,7 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
         if prev is None or dot > prev["relevance_score"]:
             best[title] = {"id": title, "label": title, "type": "chunk",
                            "description": (contents[i] or "")[:200],
+                           "content": (contents[i] or "")[:1800],
                            "relevance_score": round(float(dot), 4),
                            "source": "vector", "chunk_id": ids[i]}
     out = sorted(best.values(), key=lambda r: r["relevance_score"], reverse=True)[:limit]
