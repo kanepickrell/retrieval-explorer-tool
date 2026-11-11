@@ -62,20 +62,26 @@ def _replace_with_retry(src, dst, *a, **k):
 os.replace = _replace_with_retry   # build process only; LightRAG's atomic writes go through it
 
 
+_RETIRED: list = []   # sessions replaced after a dropped connection, closed at the end
+
+
 def _with_retry(fn, what: str, attempts: int = 4):
     async def wrapped(*a, **k):
         for i in range(attempts):
             try:
                 return await fn(*a, **k)
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, AttributeError) as e:
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, AttributeError, RuntimeError) as e:
+                # RuntimeError covers "Session is closed" from a session swapped out mid-call
                 if i == attempts - 1:
                     raise
                 print(f"[build] {what} failed ({e!r:.80}); retry {i + 1}/{attempts - 1}", flush=True)
-                try:
-                    await lp._SESSION.close()
-                except Exception:
-                    pass
-                lp._SESSION = aiohttp.ClientSession()
+                # Swap in a fresh session WITHOUT closing the old one: other calls may still
+                # be using it (llm_model_max_async > 1); closing it killed them all at once.
+                # Replaced sessions are closed at the end of the build.
+                old = lp._SESSION
+                if old is not None and old not in _RETIRED:
+                    _RETIRED.append(old)
+                    lp._SESSION = aiohttp.ClientSession()
                 await asyncio.sleep(5 * (i + 1))
     return wrapped
 
@@ -147,6 +153,11 @@ async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bo
     finally:
         await rag.finalize_storages()
         await lp._SESSION.close()
+        for old in _RETIRED:
+            try:
+                await old.close()
+            except Exception:
+                pass
     print(f"[build] DONE in {(time.time()-t0)/60:.1f} min", flush=True)
 
 
