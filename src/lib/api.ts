@@ -75,7 +75,10 @@ export const TECHNIQUE_LABEL: Record<Technique, string> = {
   local: "local", global: "global", hybrid: "hybrid", mix: "mix", agent: "agent",
 };
 
-export class ApiError extends Error {}
+export class ApiError extends Error {
+  /** HTTP status when the backend answered with an error; undefined when it was unreachable */
+  constructor(message: string, readonly status?: number) { super(message); }
+}
 
 const API_BASE = ((import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
 
@@ -94,7 +97,7 @@ async function getJson(path: string, params: Record<string, string | number | un
   if (!r.ok) {
     let detail = "";
     try { detail = (await r.json())?.detail ?? ""; } catch { /* non-JSON error body */ }
-    throw new ApiError(`${path} → ${r.status}${detail ? `: ${detail}` : ""}`);
+    throw new ApiError(`${path} → ${r.status}${detail ? `: ${detail}` : ""}`, r.status);
   }
   return r.json();
 }
@@ -516,7 +519,7 @@ async function sendJson(method: string, path: string, body?: any): Promise<any> 
   if (!r.ok) {
     let detail = "";
     try { detail = (await r.json())?.detail ?? ""; } catch { /* non-JSON error body */ }
-    throw new ApiError(`${path} → ${r.status}${detail ? `: ${detail}` : ""}`);
+    throw new ApiError(`${path} → ${r.status}${detail ? `: ${detail}` : ""}`, r.status);
   }
   return r.json();
 }

@@ -55,6 +55,7 @@ export default function Agent() {
   const [turn, setTurn] = useState<number | null>(null);      // selected turn (null = latest)
   const [err, setErr] = useState<string | null>(null);
   const [pollErr, setPollErr] = useState<string | null>(null);
+  const [gone, setGone] = useState<string | null>(null);   // a session the backend no longer has
   const [playing, setPlaying] = useState(false);
   const playRef = useRef(false);
 
@@ -75,8 +76,15 @@ export default function Agent() {
         setS(d);
         setPollErr(null);
         if (d.status === "running") t = window.setTimeout(tick, POLL_MS);
-      } catch (e: any) {   // a dropped poll: say so, retry, and clear it once one gets through
+      } catch (e: any) {
         if (stop) return;
+        if (e?.status === 404) {   // the session is gone (backend restarted): stop asking for it
+          setPollErr(null);
+          setGone(sid);
+          setSid(null);
+          return;
+        }
+        // a dropped poll: say so, retry, and clear it once one gets through
         setPollErr(String(e?.message ?? e));
         t = window.setTimeout(tick, POLL_MS * 3);
       }
@@ -132,10 +140,16 @@ export default function Agent() {
       <StageLegend />
       {err && <div className="card border-bad/40 py-2 font-mono text-[11px] text-bad">{err}</div>}
       {pollErr && <div className="font-mono text-[11px] text-warn">lost contact with the backend ({pollErr}); retrying…</div>}
+      {gone && !sid && (
+        <div className="card flex items-center gap-2 border-warn/40 py-2 text-xs text-warn">
+          Session {gone} is gone: sessions live in the backend's memory and a restart clears them. Start a new one below.
+          <button className="ml-auto text-muted hover:text-ink" onClick={() => setGone(null)}>dismiss</button>
+        </div>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[380px_minmax(0,1fr)]">
         <div className="space-y-4">
-          <StartCard base={base} onStarted={(id) => { setSid(id); setTurn(null); refreshList(); }} />
+          <StartCard base={base} onStarted={(id) => { setGone(null); setSid(id); setTurn(null); refreshList(); }} />
           {s && (
             <ConversationCard s={s} cycle={cycle} onPick={setTurn} onNext={next} onPlay={play} onStop={stop} playing={playing}
               onSay={async (m) => { setErr(null); setTurn(null); try { await pingSay(s.id, m); setS(await getPingSession(s.id)); } catch (e: any) { setErr(String(e?.message ?? e)); } }} />
@@ -146,8 +160,9 @@ export default function Agent() {
         <div className="min-w-0 space-y-4">
           {!s ? (
             <div className="card text-sm text-muted">
-              Pick a real chat from the export and press <b>Start</b>, then step through it turn by turn (or play it).
-              Each turn runs the full cycle; everything below shows what happened at each stage.
+              <b>Type a message</b> to chat with the assistant while Ping listens (click its follow-ups to answer), or
+              pick a real chat and press <b>Start</b> to replay it turn by turn. Each turn runs the full cycle; the
+              rail, graph, profile and stage cards here show what happened at each stage.
             </div>
           ) : (
             <>
