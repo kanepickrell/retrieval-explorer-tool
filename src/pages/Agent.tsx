@@ -363,10 +363,17 @@ function SessionsCard({ sessions, current, onPick }: { sessions: PingSessionSumm
 function GraphPanel({ graph, s, cycle }: { graph: { nodes: GraphNode[]; edges: GraphEdge[] }; s: PingSession; cycle: PingCycle | null }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [key, setKey] = useState(0);
-  const f = cycle?.focus ?? {};
+  // A turn only has a focus once its L1 check has run; until then keep showing the last
+  // turn that has one, so the graph moves from turn to turn instead of blanking out.
+  const shown = cycle?.focus?.hyps ? cycle
+    : [...s.cycles].reverse().find((c) => c.focus?.hyps && (!cycle || c.turn < cycle.turn)) ?? null;
+  const f = shown?.focus ?? {};
   const top = f.top ? f.hyps?.[f.top] : undefined;
+  // redraw whenever the focus changes: scopes at the L1 check, evidence at the dive, the suggestion
+  const focusKey = shown ? `${shown.turn}|${JSON.stringify(shown.focus)}` : "";
+  const stageNow = cycle ? [...PING_STAGES].reverse().find((k) => cycle.stages[k]?.status === "done" || cycle.stages[k]?.status === "skip") : undefined;
   const signals = useMemo<Signals | null>(() => {
-    if (!cycle || !f.hyps) return null;
+    if (!shown || !f.hyps) return null;
     const ids = new Set(graph.nodes.map((n) => n.id));
     const keep = (xs: string[] | undefined) => (xs ?? []).filter((x) => ids.has(x));
     const entity = new Set(top ? [...keep(top.seeds), ...keep(top.hits), ...keep(top.scope)] : []);
@@ -379,13 +386,23 @@ function GraphPanel({ graph, s, cycle }: { graph: { nodes: GraphNode[]; edges: G
     const strong = new Set([...entity, ...context]);
     const relation = new Set(graph.edges.filter((e) => strong.has(e.source) && strong.has(e.target)).map((e) => pairKey(e.source, e.target)));
     return { entity, relation, vector, context };
-  }, [cycle?.turn, s.cycles.length, graph]); // eslint-disable-line react-hooks/exhaustive-deps
-  // a new turn (or a different selected turn) re-opens the touched clusters and zooms to them
-  useEffect(() => { setKey((k) => k + 1); }, [cycle?.turn, signals]);
+  }, [focusKey, graph]); // eslint-disable-line react-hooks/exhaustive-deps
+  // each new focus re-opens the clusters it touches and zooms to them: the honing-in
+  useEffect(() => { setKey((k) => k + 1); }, [focusKey]);
   const hyp = (id?: string | null) => s.profile.hypotheses.find((h) => h.id === id);
   const t = hyp(f.top);
   return (
     <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-2 px-1 font-mono text-[11px] text-muted">
+        {shown ? (
+          <span>
+            graph: <span className="text-ink">turn {shown.turn}</span>
+            {shown === cycle
+              ? <> · {stageNow ? `after ${STAGE[stageNow].label.toLowerCase()}` : "starting"}{f.suggestion?.length ? " · suggestion in white" : f.evidence?.length ? " · evidence in white" : ""}</>
+              : <> · turn {cycle?.turn} is at {stageNow ? STAGE[stageNow].label.toLowerCase() : "observe"}; its hypotheses light up once they're checked on L1</>}
+          </span>
+        ) : <span>graph: no hypotheses checked yet; they light up after the first L1 check</span>}
+      </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-1 text-xs">
         <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: "var(--local)" }} />
           <span className="text-ink">{t ? `${t.id} (${top?.conf.toFixed(2)})` : "no top hypothesis"}</span>
