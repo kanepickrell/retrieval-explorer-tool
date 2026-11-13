@@ -483,7 +483,7 @@ export type PingFocus = {
   hyps?: Record<string, { conf: number; seeds: string[]; scope: string[]; hits: string[]; verdict: string; status: string }>;
   evidence?: string[]; suggestion?: string[];
 };
-export type PingSuggestion = { kind: string; doc: string; title: string; why: string; hypothesis: string; verdict: string; who?: string | null; excerpt?: string; strength?: "found" | "might help" };
+export type PingSuggestion = { kind: string; doc: string; title: string; why: string; hypothesis: string; verdict: string; who?: string | null; excerpt?: string; strength?: "found" | "might help"; summary?: string | null };
 export type PingCycle = {
   turn: number; user: string; reply: string | null; stages: Record<PingStageName, PingStage>;
   focus: PingFocus; snapshot?: { id: string; kind: string; claim: string; conf: number; status: string; l1: string | null }[];

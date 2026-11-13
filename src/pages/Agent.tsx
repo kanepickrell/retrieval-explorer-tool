@@ -326,8 +326,8 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
                   <span className={clsx("font-mono text-[10px]", c.suggestion.strength === "might help" ? "text-warn" : "text-good")}>
                     Ping chimes in · {c.suggestion.kind}{c.suggestion.strength === "might help" ? " · might help" : ""}{c.suggestion.who ? ` · from ${c.suggestion.who}` : ""}
                   </span>
-                  <div className="text-ink">{c.suggestion.title}</div>
-                  <div className="text-muted">{c.suggestion.why}</div>
+                  <div className="text-ink" title={`why Ping offered it: ${c.suggestion.why}`}>{c.suggestion.title}</div>
+                  <div className="text-muted">{c.suggestion.summary || c.suggestion.why}</div>
                 </div>
               )}
               {offered.length > 0 && (

@@ -62,6 +62,8 @@ MAX_SESSIONS = 30
 MAX_ACTIVE = 4                 # live hypotheses kept
 NEW_CONF = 0.35
 ASKED_CONF = 0.60
+PARTIAL_TOP = 3                # ...and a "might help" (partial) one among the top 3
+OWN_TOP = 7                    # a suggestion must be among the top records the user's own words find
 PREFER = {"idea": ("agent-", "tool-", "step-"), "insight": ("chat-",)}   # record kinds each hypothesis kind is after              # a new hypothesis the user asked for outright starts confirmed, near the gate
 GATE_CONF = 0.65
 MIN_AGREE = 2                  # an unscoped hypothesis holds up only if its search shares 2+ of the top 5 docs with the user's own words
@@ -475,6 +477,13 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         h = gate_h
         hv = {k: h[k] for k in ("claim", "answer_type", "target", "scope", "query")}
         docs = await asyncio.to_thread(A._execute, log, L, hv, h["_v"], user_words, exclude)
+        # Only records the user's own recent words also lead to go on to the check, so the judge
+        # can't pick something off-topic (it sometimes calls an unrelated chat "answers").
+        own_top = list(A._best_chunk(await asyncio.to_thread(A._chunks, L, user_words, exclude)))[:OWN_TOP]
+        on = [d for d in docs if L["alias"].get(d["doc"], d["doc"]) in own_top]
+        log.emit("guard", f"{len(on)} of {len(docs)} candidates are on-topic",
+                 f"kept only records among the top {OWN_TOP} for the user's own recent messages")
+        docs = on
         pref = PREFER.get(h["kind"])
         if pref:   # an idea is answered by an agent/tool/step, an insight by someone's chat: when the search
             mine = [d for d in docs if d["doc"].startswith(pref)]   # found any, only those go to the check
@@ -495,7 +504,17 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
                docs=[{"doc": d["doc"], "title": A._title(L, d["doc"]), "via": d["via"]} for d in docs[:6]])
         t0 = time.perf_counter()
         pick = next((d for d in docs if d["doc"] not in P["suggested"]), None)
-        if pick and chk["verdict"] in ("answers", "partial"):   # "partial" is offered softly, as "might help"
+        # Deterministic guard on the LLM check: the record must also be among the top records the
+        # user's own recent words find. A record those words don't lead to is off-topic, whatever
+        # the judge said.
+        on_topic = bool(pick) and L["alias"].get(pick["doc"], pick["doc"]) in own_top   # (kept as a safety net)
+        if pick and not on_topic:
+            log.emit("guard", "Off-topic: the user's own words don't lead to this record",
+                     f"{pick['doc']} is not in the top {OWN_TOP} records for the user's recent messages")
+        # "partial" is offered softly ("might help"), and only for a record the user's own words rank
+        # in their top few: a weak verdict needs strong topical evidence
+        strong_topic = bool(pick) and L["alias"].get(pick["doc"], pick["doc"]) in own_top[:PARTIAL_TOP]
+        if pick and on_topic and (chk["verdict"] == "answers" or (chk["verdict"] == "partial" and strong_topic)):
             excerpt = next((x["excerpt"] for e in log.events if e["kind"] == "evidence"
                             for x in e["data"].get("evidence", []) if x["doc"] == pick["doc"]), None) or _clip(pick["text"], 700)
             sug = {"kind": _kind_of(pick["doc"]), "doc": pick["doc"], "title": A._title(L, pick["doc"]), "why": chk.get("why", ""),
@@ -508,7 +527,9 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
             _stage(cycle, "suggest", "done", f"Suggested ({sug['kind']}, {sug['strength']}): {sug['title']}", sug["why"], t0, suggestion=sug)
         else:
             _stage(cycle, "suggest", "skip",
-                   f"Stayed quiet: the evidence check said {chk['verdict']}" if pick else "Stayed quiet: nothing new to suggest",
+                   ("Stayed quiet: off-topic for what the user actually wrote" if not on_topic else
+                    "Stayed quiet: only a partial match, and not among the user's top few records" if chk["verdict"] == "partial" else
+                    f"Stayed quiet: the evidence check said {chk['verdict']}") if pick else "Stayed quiet: nothing new to suggest",
                    chk.get("why", ""), t0, check=chk)
 
     # the chat model answers now, after Ping's suggest, so it can use what Ping found
@@ -605,13 +626,12 @@ def _state(s: Session) -> dict:
             "pending": s.pending, "chat_model": lp.LLM}
 
 
-# The chat model the user talks to: a plain assistant, as in Open WebUI. It has no access
-# to the knowledge base -- surfacing what the team already has is Ping's job, alongside it.
+# The chat model the user talks to: a plain assistant, as in Open WebUI. It never mentions Ping:
+# when Ping finds something, it gets that as background and works it into its answer; the
+# user sees Ping's own chime-in (with the link) below the reply.
 CHAT_SYSTEM = ("You are a helpful AI assistant in a team's chat app. Answer the user directly and concisely, "
-               "using markdown where it helps. You can't see the team's internal documents, files or past chats yourself; "
-               "a teammate assistant, Ping, watches the chat and points the user to anything relevant it finds there. So if the "
-               "user asks whether others hit this, or for internal docs, say Ping will chime in if it finds something, and "
-               "still help with what you can. Don't tell them to search elsewhere, and never address Ping or ask it to do things.")
+               "using markdown where it helps. You can't see the team's internal documents, files or past chats yourself, "
+               "so don't claim to have searched them, and don't tell the user to search elsewhere.")
 
 
 def _finding_lines(f: dict) -> str:
@@ -626,19 +646,19 @@ async def _chat_reply(s: Session, msg: str, finding: Optional[dict] = None, earl
     hist = [{"role": t["role"], "content": t["content"][:4000]} for t in turns[-8:]]
     system = CHAT_SYSTEM
     if earlier:
-        system += ("\n\nEarlier in this chat Ping already pointed the user to:\n" + "".join(_finding_lines(f) for f in earlier)
-                   + "Refer back to these when relevant instead of saying Ping is still looking.")
+        system += ("\n\nBackground the user was already shown earlier in this chat (from the team's own records):\n"
+                   + "".join(_finding_lines(f) for f in earlier)
+                   + "You may refer back to it the same way, briefly.")
     if finding:
-        system += ("\n\nPing just found this in the team's knowledge base for the user's message"
-                   + (" (a partial match: present it as possibly helpful, not as the answer)" if finding.get("strength") == "might help" else "")
-                   + ":\n" + _finding_lines(finding)
-                   + f"  matching passage: {finding.get('excerpt') or ''}\n"
-                   "Use it in your answer where it helps: say Ping found it and who it's from, lead with what it says "
-                   "actually resolved things, and don't claim more than the summary and passage say.")
+        system += ("\n\nBackground for this message, from the team's own records; the user sees the record itself just below "
+                   "your reply" + (" (it may only partly fit: treat it as possibly relevant)" if finding.get("strength") == "might help" else "")
+                   + ":\n" + _finding_lines(finding) + f"  passage: {finding.get('excerpt') or ''}\n"
+                   "If it really bears on what the user asked, work it into your own answer briefly and naturally, the way a "
+                   "colleague would: say in your own words which teammate or team ran into it and what actually resolved it. "
+                   "Use only facts from the background above. If it doesn't bear on the question, ignore it.")
     if earlier or finding:
-        system += " Don't promise what Ping will do next; just use what it found."
-    if earlier or finding:
-        system += " Never write links, URLs or placeholders for them; Ping shows the user the link itself."
+        system += (" Never mention an assistant, a tool, a search or a 'knowledge base', never write links or placeholders, "
+                   "and don't claim more than the background says.")
     out = await lp._ollama_llm(msg, system_prompt=system, history_messages=hist)
     return (out or "").strip() or "(the chat model returned nothing)"
 
