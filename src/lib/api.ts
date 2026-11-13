@@ -322,11 +322,43 @@ export async function assist(opts: {
     throw new ApiError(`backend unreachable at ${API_BASE}`);
   }
   if (!r.ok) throw new ApiError(`/api/assist → ${r.status}`);
-  const d = await r.json();
+  return mapAssist(await r.json(), opts.technique, opts.topK, opts.limit);
+}
+
+function mapAssist(d: any, technique: Technique, topK: number, limit: number): AssistResult {
   return {
     query: d.query ?? null, stayQuiet: !!d.stay_quiet, reason: d.reason ?? null,
     suggestions: (d.suggestions ?? []).map(mapSuggestion), candidates: (d.candidates ?? []).map(mapSuggestion),
     stages: d.stages ?? [], totalMs: Math.round(Number(d.total_ms ?? 0)),
-    retrieval: d.retrieval ? mapResult(d.retrieval, opts.technique, opts.topK, opts.limit) : null,
+    retrieval: d.retrieval ? mapResult(d.retrieval, technique, topK, limit) : null,
   };
+}
+
+/** One /api/assist call as the backend logged it (see server/live.py). */
+export type LiveEvent = {
+  seq: number; at: number;
+  /** "open-webui" = a real Chime In from Open WebUI; "explorer" = this app's chat replay */
+  source: "open-webui" | "explorer" | "other";
+  dataset: string | null; technique: Technique; queryStrategy: QueryStrategy;
+  llmFilter: boolean; minScore: number;
+  turns: ChatTurn[]; error: string | null; result: AssistResult | null;
+};
+
+export async function listLive(after: number): Promise<{ latest: number; events: LiveEvent[] }> {
+  const d = await getJson("/api/live", { after });
+  return {
+    latest: Number(d.latest ?? 0),
+    events: (d.events ?? []).map((e: any): LiveEvent => ({
+      seq: Number(e.seq), at: Number(e.at), source: e.source ?? "other", dataset: e.dataset ?? null,
+      technique: e.technique, queryStrategy: e.query_strategy, llmFilter: !!e.llm_filter, minScore: Number(e.min_score),
+      turns: e.turns ?? [], error: e.error ?? null,
+      result: e.error ? null : mapAssist(e.response ?? {}, e.technique, Number(e.top_k ?? 0), Number(e.limit ?? 5)),
+    })),
+  };
+}
+
+/** One document's full source markdown (what Ping links to). */
+export type DocSource = { dataset: string; doc: string; kind: string; title: string; markdown: string };
+export async function getDocSource(datasetId: string, doc: string): Promise<DocSource> {
+  return getJson("/documents/source", { dataset: datasetId, doc });
 }

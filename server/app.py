@@ -47,6 +47,8 @@ init_graph_search(None)          # retrieval is corpus-backed; no GraphDB handle
 app.include_router(search_router)  # mounts /api/search/unified and friends
 from assist import router as assist_router  # noqa: E402
 app.include_router(assist_router)  # /api/assist (chime-in)
+from live import router as live_router  # noqa: E402
+app.include_router(live_router)  # /api/live (feed of chime-in calls for the Live page)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 
@@ -111,6 +113,24 @@ def document_chunks(doc: str = Query(..., description="document id (file name) f
     return DS.chunks_of(DS.get(dataset), doc)
 
 
+@app.get("/documents/source")
+def document_source(doc: str = Query(..., description="document id (file name), e.g. chat-<id>.md"),
+                    dataset: str | None = Query(None)):
+    """One document's full source markdown, as it was indexed. This is what Ping links to:
+    the readable copy of a surfaced chat, file, agent or step."""
+    import re as _re
+    ds = DS.get(dataset)
+    if not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.md", doc or "") or not ds.docs_dir:
+        raise HTTPException(404, "no such document")
+    f = ds.docs_dir / doc
+    if not f.is_file():
+        raise HTTPException(404, f"'{doc}' is not in dataset '{ds.id}'")
+    md = f.read_text(encoding="utf-8", errors="replace")
+    from assist import doc_title
+    return {"dataset": ds.id, "doc": doc, "kind": doc.split("-", 1)[0],
+            "title": doc_title(ds, doc, md), "markdown": md}
+
+
 @app.get("/graph")
 def graph(dataset: str | None = Query(None)):
     return _load_corpus_graph(dataset)
@@ -122,14 +142,35 @@ def graph_stats(dataset: str | None = Query(None)):
     return {"dataset": DS.get(dataset).id, "nodes": len(g["nodes"]), "edges": len(g["edges"])}
 
 
+_STATIC = Path(os.getenv("STATIC_DIR", "")) if os.getenv("STATIC_DIR") else None
+
+
 @app.get("/")
 def root():
+    if _STATIC and (_STATIC / "index.html").exists():
+        from fastapi.responses import FileResponse
+        return FileResponse(_STATIC / "index.html")
     return {
         "ok": True,
         "datasets": "/datasets",
         "graph": "/graph?dataset=<id>",
         "search": "/api/search/unified?q=...&force_strategy=vector&dataset=<id>",
     }
+
+
+if _STATIC and (_STATIC / "index.html").exists():
+    # Built frontend served from the same origin (the Docker image sets STATIC_DIR).
+    # Registered last so every API route above wins; unknown paths get the SPA.
+    from fastapi.responses import FileResponse
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str):
+        if path.startswith("api/"):
+            raise HTTPException(404, "not found")
+        f = (_STATIC / path).resolve()
+        if f.is_file() and f.is_relative_to(_STATIC.resolve()):
+            return FileResponse(f)
+        return FileResponse(_STATIC / "index.html")
 
 
 if __name__ == "__main__":

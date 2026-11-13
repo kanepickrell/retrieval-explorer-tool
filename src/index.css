@@ -53,3 +53,13 @@ body {
   100% { transform: translate(-4px, 4px); }
 }
 @media (prefers-reduced-motion: reduce) { .orb-drift { animation: none; } }
+.doc-md h1, .doc-md h2, .doc-md h3 { font-family: "Archivo", system-ui, sans-serif; font-weight: 600; margin: 1.2em 0 0.4em; }
+.doc-md h2 { font-size: 1.05rem; color: var(--ink); border-bottom: 1px solid var(--line); padding-bottom: 0.2em; }
+.doc-md h3 { font-size: 0.95rem; }
+.doc-md ol { margin: 0 0 0.7em; padding-left: 1.4em; list-style: decimal; }
+.doc-md pre { background: var(--surface-2); border-radius: 6px; padding: 0.7em 0.9em; overflow-x: auto; margin: 0 0 0.8em; }
+.doc-md pre code { background: none; padding: 0; }
+.doc-md table { border-collapse: collapse; margin: 0 0 0.8em; }
+.doc-md td, .doc-md th { border: 1px solid var(--line); padding: 0.25em 0.5em; }
+.doc-md hr { border-color: var(--line); margin: 1em 0; }
+.doc-md a { text-decoration: underline; }

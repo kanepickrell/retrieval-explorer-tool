@@ -4,6 +4,8 @@ import Header from "@/components/Header";
 import Explorer from "@/pages/Explorer";
 import Compare from "@/pages/Compare";
 import Prospector from "@/pages/Prospector";
+import Live from "@/pages/Live";
+import Doc from "@/pages/Doc";
 
 export default function App() {
   return (
@@ -15,6 +17,8 @@ export default function App() {
             <Route path="/" element={<Explorer />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/prospector" element={<Prospector />} />
+            <Route path="/live" element={<Live />} />
+            <Route path="/doc" element={<Doc />} />
             <Route path="*" element={<Explorer />} />
           </Routes>
         </div>

@@ -219,7 +219,7 @@ function Message({ turn }: { turn: ChatTurn }) {
   );
 }
 
-function Chime({ entry, onOpen }: { entry: Exclude<Entry, { kind: "msg" }>; onOpen: (r: AssistResult) => void }) {
+export function Chime({ entry, onOpen }: { entry: Exclude<Entry, { kind: "msg" }>; onOpen: (r: AssistResult) => void }) {
   if (entry.status === "loading") {
     return (
       <div className="flex items-center gap-2 pl-1 font-mono text-[11px] text-muted">
