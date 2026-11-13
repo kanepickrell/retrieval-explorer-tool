@@ -63,6 +63,34 @@ async def unified_search(
     return await run_unified(q, limit, force_strategy, dataset, top_k, fresh_keywords)
 
 
+_META_GRAPHS: dict = {}   # graphml path -> (mtime, nx graph)
+
+
+def _metadata_subgraph(storage, doc_ids: List[str]) -> Optional[dict]:
+    """Touched subgraph for a metadata-graph dataset (ingest/build_metadata_graph.py):
+    the nodes whose card was retrieved plus their direct neighbours (user, team, topics,
+    files, agents), so the graph view shows where each hit sits."""
+    import networkx as nx
+    f = storage / "graph_chunk_entity_relation.graphml"
+    if not f.exists():
+        return None
+    mtime = f.stat().st_mtime
+    hit = _META_GRAPHS.get(str(f))
+    if not hit or hit[0] != mtime:
+        hit = _META_GRAPHS[str(f)] = (mtime, nx.read_graphml(f))
+    G = hit[1]
+    wanted = set(doc_ids)
+    seeds = [n for n, d in G.nodes(data=True) if d.get("file_path") in wanted]
+    keep = set(seeds)
+    for n in seeds:
+        keep.update(G.neighbors(n))
+    nodes = [{"id": n, "label": n, "type": G.nodes[n].get("entity_type", "UNKNOWN"),
+              "file_path": G.nodes[n].get("file_path", "")} for n in keep]
+    edges = [{"source": u, "target": v, "label": (d.get("keywords") or "")[:40]}
+             for u, v, d in G.subgraph(keep).edges(data=True)]
+    return {"nodes": nodes, "edges": edges}
+
+
 async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = None,
                       dataset: Optional[str] = None, top_k: Optional[int] = None,
                       fresh_keywords: bool = False, exclude_docs: Optional[set] = None) -> dict:
@@ -95,6 +123,8 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
         contexts = [r.pop("content", "") for r in results]
         # exactly the context naive RAG generates over
         context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
+        if ds.storage.name == "storage-metadata":
+            graph = _metadata_subgraph(ds.storage, [r["id"] for r in results])
         if not results:
             note = ("no keyword matches for this query" if strategy == "bm25" else
                     "no vector results -- check the embed host "
@@ -167,7 +197,7 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
         # minus this is the retrieval itself, which is what differs between modes
         "keyword_ms": next((s.get("ms") for s in steps if s.get("label", "").startswith(("Extract keywords", "Keywords"))), None),
         "note": note,
-        "graph": graph,  # {nodes, edges} for lightrag strategies, else null
+        "graph": graph,  # {nodes, edges}: lightrag strategies and metadata-graph datasets, else null
         "steps": steps,  # measured pipeline stages: [{label, detail, stat, ms}]
         "results": results,
     }
