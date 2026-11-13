@@ -93,15 +93,17 @@ def duplicate_aliases(ds: Dataset) -> Dict[str, str]:
 
 def gold_entries(ds: Dataset) -> List[dict]:
     """The dataset's gold set: eval_set.json (real user requests) plus, when
-    present, eval_set_generated.json next to it (LLM-written questions, tagged
-    query_type generated_*)."""
+    present next to it, eval_set_generated.json (LLM-written questions, tagged
+    query_type generated_*) and eval_set_structural.json (questions about how the
+    records relate, answered exactly from the metadata graph: structural_*)."""
     g = _read(ds.gold) if ds.gold and ds.gold.exists() else None
     if not isinstance(g, list):
         return []
-    gen = ds.gold.parent / "eval_set_generated.json"
-    extra = _read(gen) if ds.gold.name == "eval_set.json" and gen.exists() else None
-    if isinstance(extra, list):
-        g = g + extra
+    for name in ("eval_set_generated.json", "eval_set_structural.json"):
+        f = ds.gold.parent / name
+        extra = _read(f) if ds.gold.name == "eval_set.json" and f.exists() else None
+        if isinstance(extra, list):
+            g = g + extra
     alias = duplicate_aliases(ds)
     if alias:
         for e in g:

@@ -49,6 +49,8 @@ from assist import router as assist_router  # noqa: E402
 app.include_router(assist_router)  # /api/assist (chime-in)
 from live import router as live_router  # noqa: E402
 app.include_router(live_router)  # /api/live (feed of chime-in calls for the Live page)
+from agent_loop import router as agent_router  # noqa: E402
+app.include_router(agent_router)  # /api/agent (routing agent: runs + live events)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 

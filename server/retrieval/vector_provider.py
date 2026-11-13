@@ -62,22 +62,47 @@ def _load_index(storage_dir: str = None) -> Dict:
     return _INDEX[key]
 
 
+_QVEC: Dict[str, List[float]] = {}   # query -> normalized embedding (a search embeds it twice)
+EMBED_RETRY_S = 60.0                 # after a failed embed, skip embedding for this long
+_EMBED_DOWN_UNTIL = 0.0
+
+
+def embed_available() -> bool:
+    """False while the circuit breaker is open (a recent embed failed or timed out)."""
+    import time
+    return time.time() >= _EMBED_DOWN_UNTIL
+
+
 def _embed_query(text: str) -> Optional[List[float]]:
     """Embed the query with the same model + 'search_query:' prefix as the index.
-    Returns an L2-normalized vector, or None on any failure (graceful degrade)."""
+    Returns an L2-normalized vector, or None on any failure (graceful degrade).
+    Cached per query; after a failure, further calls return None at once for
+    EMBED_RETRY_S, so a stalled embed host costs one timeout, not one per call."""
+    global _EMBED_DOWN_UNTIL
+    import time
+    if text in _QVEC:
+        return _QVEC[text]
+    if not embed_available():
+        return None
     try:
         res = httpx.post(f"{EMBED_HOST}/api/embed",
                          json={"model": EMBED_MODEL, "input": ["search_query: " + text]},
                          timeout=30.0)
         if res.status_code != 200:
+            _EMBED_DOWN_UNTIL = time.time() + EMBED_RETRY_S
             return None
         vec = res.json()["embeddings"][0]
     except Exception:
+        _EMBED_DOWN_UNTIL = time.time() + EMBED_RETRY_S
         return None
     norm = sum(x * x for x in vec) ** 0.5
     if norm == 0.0:
         return None
-    return [x / norm for x in vec]
+    out = [x / norm for x in vec]
+    if len(_QVEC) > 2000:
+        _QVEC.clear()
+    _QVEC[text] = out
+    return out
 
 
 def status() -> Dict:

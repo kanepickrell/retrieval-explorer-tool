@@ -18,7 +18,7 @@
 
 // ───────────────────────── Types (the contract) ─────────────────────────
 
-export type Technique = "vector" | "bm25" | "bm25_vector" | "local" | "global" | "hybrid" | "mix";
+export type Technique = "vector" | "bm25" | "bm25_vector" | "local" | "global" | "hybrid" | "mix" | "agent";
 export type GraphNode = { id: string; label: string; cluster: string; type: string; size: number; description?: string };
 export type GraphEdge = { id: string; source: string; target: string; weight: number; label?: string };
 export type Step = { label: string; detail: string; stat?: string; ms?: number };
@@ -68,11 +68,11 @@ export type DocumentSummary = {
 };
 export type DocChunk = { id: string; order: number; tokens: number; content: string; entities: string[] };
 
-export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "local", "global", "hybrid", "mix"];
+export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "local", "global", "hybrid", "mix", "agent"];
 /** display names (ids are URL-safe) */
 export const TECHNIQUE_LABEL: Record<Technique, string> = {
   vector: "vector", bm25: "bm25", bm25_vector: "bm25+vector",
-  local: "local", global: "global", hybrid: "hybrid", mix: "mix",
+  local: "local", global: "global", hybrid: "hybrid", mix: "mix", agent: "agent",
 };
 
 export class ApiError extends Error {}
@@ -361,4 +361,75 @@ export async function listLive(after: number): Promise<{ latest: number; events:
 export type DocSource = { dataset: string; doc: string; kind: string; title: string; markdown: string };
 export async function getDocSource(datasetId: string, doc: string): Promise<DocSource> {
   return getJson("/documents/source", { dataset: datasetId, doc });
+}
+
+
+// ───────────────────────── Routing agent (server/agent_loop.py) ─────────────────────────
+
+/** One step of the agent loop, as it happened: goal, hypothesis, validate, revise, route,
+ *  search, fallback, evidence, check, retry, result, waiting, error. */
+export type AgentEvent = {
+  i: number; ms: number; tookMs: number; kind: string; title: string; detail: string; data: any;
+};
+export type AgentStatus = "running" | "done" | "waiting" | "error";
+export type AgentRunSummary = {
+  id: string; at: number; source: string; dataset: string; status: AgentStatus;
+  query: string; goal: string | null; route: string | null; steps: number; ms: number;
+};
+export type AgentDoc = { doc: string; title: string; score: number | null; via: string; chunkId: string | null; text: string };
+export type AgentRunDetail = AgentRunSummary & {
+  turns: ChatTurn[]; error: string | null; events: AgentEvent[];
+  result: { route: string | null; answer: string | null; docs: AgentDoc[]; check?: any; waiting?: string; error?: string } | null;
+};
+
+const mapRunSummary = (r: any): AgentRunSummary => ({
+  id: String(r.id), at: Number(r.at), source: String(r.source ?? "other"), dataset: String(r.dataset ?? ""),
+  status: r.status, query: String(r.query ?? ""), goal: r.goal ?? null, route: r.route ?? null,
+  steps: Number(r.events ?? 0), ms: Number(r.ms ?? 0),
+});
+
+export async function startAgent(opts: {
+  datasetId: string; turns?: ChatTurn[]; query?: string; requireClear?: boolean; excludeDocs?: string[];
+}): Promise<string> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}/api/agent/run`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dataset: opts.datasetId, turns: opts.turns ?? [], query: opts.query ?? null, source: "explorer",
+        require_clear: opts.requireClear ?? true, exclude_docs: opts.excludeDocs ?? [],
+      }),
+    });
+  } catch {
+    throw new ApiError(`backend unreachable at ${API_BASE}`);
+  }
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json())?.detail ?? ""; } catch { /* non-JSON error body */ }
+    throw new ApiError(`/api/agent/run → ${r.status}${detail ? `: ${detail}` : ""}`);
+  }
+  return String((await r.json()).id);
+}
+
+export async function listAgentRuns(): Promise<AgentRunSummary[]> {
+  return ((await getJson("/api/agent/runs")) ?? []).map(mapRunSummary);
+}
+
+export async function getAgentRun(id: string, after = 0): Promise<AgentRunDetail> {
+  const d = await getJson(`/api/agent/runs/${encodeURIComponent(id)}`, { after });
+  return {
+    ...mapRunSummary(d), turns: d.turns ?? [], error: d.error ?? null,
+    events: (d.events ?? []).map((e: any): AgentEvent => ({
+      i: Number(e.i), ms: Number(e.ms), tookMs: Number(e.took_ms ?? 0), kind: String(e.kind),
+      title: String(e.title ?? ""), detail: String(e.detail ?? ""), data: e.data ?? {},
+    })),
+    result: d.result ? {
+      route: d.result.route ?? null, answer: d.result.answer ?? null, check: d.result.check,
+      waiting: d.result.waiting, error: d.result.error,
+      docs: (d.result.docs ?? []).map((x: any): AgentDoc => ({
+        doc: String(x.doc), title: String(x.title ?? x.doc), score: typeof x.score === "number" ? x.score : null,
+        via: String(x.via ?? ""), chunkId: x.chunk_id ?? null, text: String(x.text ?? ""),
+      })),
+    } : null,
+  };
 }

@@ -103,6 +103,7 @@ export default function Header() {
         <NavLink to="/" end className={link}>Explorer</NavLink>
         <NavLink to="/compare" className={link}>Compare</NavLink>
         <NavLink to="/prospector" className={link}>Prospector</NavLink>
+        <NavLink to="/agent" className={link}>Agent</NavLink>
         <NavLink to="/live" className={link}>Live</NavLink>
       </nav>
       <DatasetPicker />

@@ -7,7 +7,8 @@ or any real-user graph.
 | endpoint | returns |
 |---|---|
 | `GET /graph` | corpus knowledge graph `{nodes, edges}` (from the LightRAG graphml) |
-| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense) or `local`/`global`/`hybrid`/`mix` (LightRAG), with the touched subgraph + ranked chunks |
+| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense) or `local`/`global`/`hybrid`/`mix` (LightRAG), `bm25`/`bm25_vector`, or `agent` (routing agent), with the touched subgraph + ranked chunks |
+| `POST /api/agent/run`, `GET /api/agent/runs[/{id}]` | routing agent runs and their step-by-step events (the Agent page polls these) |
 
 ## Run
 
@@ -51,3 +52,6 @@ Graph, retrieval, touched subgraph, ranked chunks and the step counts are
 | `unified_search.py` | query-intent analysis (`analyze_query_intent`) |
 | `retrieval/vector_provider.py` | naive dense retrieval over the chunk vdb |
 | `retrieval/lightrag_provider.py` | LightRAG local/global/hybrid/mix + answer generation |
+| `agent_loop.py` | routing agent: goal → hypotheses → validate on the metadata graph → route (records / document / detail) → scoped dive → check, with H0 (the user's own words) as the fallback |
+| `ingest/build_metadata_graph.py` | metadata graph from the export tables (no LLM): one card per record, written as `storage-metadata/` → dataset `<export>~metadata`; teams from `<export>/teams.json` (pseudonyms only) |
+| `ingest/build_structural_gold.py` | `eval_set_structural.json`: questions about how records relate, answered exactly from the metadata graph |

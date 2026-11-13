@@ -53,7 +53,7 @@ async def unified_search(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(20, le=100),
     force_strategy: Optional[str] = Query(
-        None, description="vector | bm25 | bm25_vector | local | global | hybrid | mix"),
+        None, description="vector | bm25 | bm25_vector | local | global | hybrid | mix | agent"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
     top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
     fresh_keywords: bool = Query(False, description="bypass the keyword cache (cold LLM extraction)"),
@@ -129,6 +129,24 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
             note = ("no keyword matches for this query" if strategy == "bm25" else
                     "no vector results -- check the embed host "
                     f"({vector_provider.EMBED_HOST}) and corpus storage")
+    elif strategy == "agent":
+        # routing agent (agent_loop.py): goal -> hypotheses -> validate on the metadata
+        # graph -> scoped search. Its events also stream to the Agent page.
+        import agent_loop
+        arun = agent_loop.AgentRun(ds.id, [{"role": "user", "content": q}], "search")
+        out = await agent_loop.run_agent(arun, require_clear=False, exclude=exclude_docs)
+        via = {"chunk": "C", "card": "B+C", "graph": "E"}
+        results = [{"id": d["doc"], "label": d["doc"], "type": "chunk", "chunk_id": d["chunk_id"] or d["doc"],
+                    "description": (d["text"] or "")[:200], "content": d["text"] or "",
+                    "relevance_score": d["score"], "rank": i, "via": via.get(d["via"]), "source": "agent"}
+                   for i, d in enumerate(out.get("docs", [])[:limit], 1)]
+        steps = [{"label": e["title"][:90], "detail": e["detail"][:240], "stat": e["kind"], "ms": e["took_ms"]}
+                 for e in arun.events]
+        graph = agent_loop.subgraph(ds.id, out)
+        contexts = [r.pop("content", "") for r in results]
+        context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
+        note = out.get("error") or out.get("waiting") or (None if results else "the agent found nothing")
+        lr_ms = round(arun.events[-1]["ms"], 1) if arun.events else None
     elif strategy in LIGHTRAG_ALIASES:
         # lazy import so a missing LightRAG install never breaks the vector path
         try:
@@ -182,7 +200,7 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
         "run_id": run.id,
         "query": q,
         "dataset": ds.id,
-        "strategy_used": strategy if (results or strategy == "vector" or strategy in LEXICAL) else "none",
+        "strategy_used": strategy if (results or strategy in ("vector", "agent") or strategy in LEXICAL) else "none",
         "intent_analysis": {
             "recommended_strategy": intent.strategy.value,
             "confidence": intent.confidence,

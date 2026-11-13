@@ -6,6 +6,7 @@ import Compare from "@/pages/Compare";
 import Prospector from "@/pages/Prospector";
 import Live from "@/pages/Live";
 import Doc from "@/pages/Doc";
+import Agent from "@/pages/Agent";
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
             <Route path="/" element={<Explorer />} />
             <Route path="/compare" element={<Compare />} />
             <Route path="/prospector" element={<Prospector />} />
+            <Route path="/agent" element={<Agent />} />
             <Route path="/live" element={<Live />} />
             <Route path="/doc" element={<Doc />} />
             <Route path="*" element={<Explorer />} />

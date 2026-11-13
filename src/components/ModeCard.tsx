@@ -12,6 +12,7 @@ const HINTS: Record<Technique, string> = {
   global: "Relation-centric: rank the strongest relationships for the query.",
   hybrid: "Local entities plus global relations, merged.",
   mix: "Hybrid plus chunk vector search — the default mode.",
+  agent: "Routing agent: states the goal, hypothesises where the answer lives, checks it on the metadata graph, then searches scoped. Watch it on the Agent page.",
 };
 
 type Props = {
