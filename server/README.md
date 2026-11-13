@@ -1,14 +1,19 @@
 # Retrieval Explorer backend
 
-Corpus-RAG backend for the frontend. Serves the two endpoints `src/lib/api.ts`
-calls, over the **synthetic Agent Hub corpus only** — it never touches GraphDB
-or any real-user graph.
+Corpus-RAG backend for the frontend. Serves the datasets under `datasets/`: the
+synthetic Agent Hub corpus and any pseudonymized Agent Hub / Open WebUI export in
+`datasets/incoming/` (gitignored, never committed). It never touches GraphDB.
 
 | endpoint | returns |
 |---|---|
-| `GET /graph` | corpus knowledge graph `{nodes, edges}` (from the LightRAG graphml) |
-| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense) or `local`/`global`/`hybrid`/`mix` (LightRAG), `bm25`/`bm25_vector`, or `agent` (routing agent), with the touched subgraph + ranked chunks |
-| `POST /api/agent/run`, `GET /api/agent/runs[/{id}]` | routing agent runs and their step-by-step events (the Agent page polls these) |
+| `GET /datasets`, `GET /documents[/chunks\|/source]` | the datasets and their docs, chunks and source files |
+| `GET /graph`, `GET /api/graph/stats` | a dataset's knowledge graph `{nodes, edges}` (LightRAG or metadata graphml) |
+| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense), `local`/`global`/`hybrid`/`mix` (LightRAG), `bm25`/`bm25_vector`, or `agent` (routing agent), with the touched subgraph + ranked chunks |
+| `GET /api/search/answer`, `GET /api/search/metrics` | the generated answer for a run, and its Ragas-style metrics + recall@k |
+| `POST /api/assist`, `GET /api/assist/chats` | one chime-in decision for a conversation; replayable export chats |
+| `GET /api/live` | feed of chime-in calls (the Live page) |
+| `POST /api/agent/run`, `GET /api/agent/runs[/{id}[/graph]]` | routing agent runs and their step-by-step events |
+| `/api/ping/chats`, `/api/ping/sessions[/{id}[/next\|/say]]` | Ping cycle sessions: replay a real chat or type to the chat model; per-turn stages (the Agent page) |
 
 ## Run
 
@@ -33,25 +38,21 @@ Config (env):
 
 Point the frontend at it with `VITE_API_URL` (see `../.env`).
 
-## Status (phase 1)
-
-Graph, retrieval, touched subgraph, ranked chunks and the step counts are
-**real**. Still to come (phase 2):
-
-- generated answer (LLM over the retrieved context) — currently the Answer tab
-  summarises the retrieved chunks and says so.
-- Ragas metrics (Faithfulness, Answer Relevancy, Context Precision/Recall, …)
-  and deterministic recall@k — currently rendered as `pending` tiles.
-
 ## Files
 
 | file | role |
 |---|---|
-| `app.py` | FastAPI app: `/graph` + mounts the search router |
+| `app.py` | FastAPI app: datasets, documents, `/graph`; mounts the routers below |
+| `datasets.py` | dataset registry: each export's storage dirs, docs and gold sets |
 | `graph_search.py` | `/api/search/unified` (retrieval) + `/api/search/answer` (generation) |
 | `unified_search.py` | query-intent analysis (`analyze_query_intent`) |
 | `retrieval/vector_provider.py` | naive dense retrieval over the chunk vdb |
-| `retrieval/lightrag_provider.py` | LightRAG local/global/hybrid/mix + answer generation |
+| `retrieval/bm25_provider.py` | BM25 over chunks, and BM25+vector Reciprocal Rank Fusion (`search_fused`) |
+| `retrieval/lightrag_provider.py` | LightRAG local/global/hybrid/mix + answer generation; the shared `llm` call |
+| `runs.py` / `metrics.py` | retrieval runs kept for the Answer tab; Ragas-style metrics with the local judge |
+| `assist.py` / `live.py` | chime-in decisions for a conversation, and their live feed |
 | `agent_loop.py` | routing agent: goal → hypotheses → validate on the metadata graph → route (records / document / detail) → scoped dive → check, with H0 (the user's own words) as the fallback |
+| `ping_cycle.py` | Ping: a profile of what the user is after across the conversation (hypotheses kept as artifact / insight / idea), checked on the metadata graph each turn, tested through the follow-ups, and acted on only past a gate; plus the chat model for typed sessions |
 | `ingest/build_metadata_graph.py` | metadata graph from the export tables (no LLM): one card per record, written as `storage-metadata/` → dataset `<export>~metadata`; teams from `<export>/teams.json` (pseudonyms only) |
+| `ingest/plant.py` + `ingest/packs/` | copy an export to `<export>-planted` and add a fictional test scenario with its answer key (`range_reset_beacons`) |
 | `ingest/build_structural_gold.py` | `eval_set_structural.json`: questions about how records relate, answered exactly from the metadata graph |

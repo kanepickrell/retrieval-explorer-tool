@@ -43,11 +43,10 @@ import json
 import re
 import time
 from collections import OrderedDict, defaultdict
-from pathlib import Path
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 import datasets as DS
 from retrieval import bm25_provider as bp

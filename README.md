@@ -5,23 +5,31 @@ techniques (`vector · local · global · hybrid · mix`) and watching what each
 retrieves over a knowledge graph: the touched subgraph, the chunks, the step
 trace, the streamed answer and Ragas-style metrics.
 
-Standalone prototype for ProtoGraph. It runs entirely on mock data for now.
+Standalone prototype for ProtoGraph. The data comes from the backend in
+`server/` (see `server/README.md`): a synthetic Agent Hub corpus, or a
+pseudonymized Agent Hub / Open WebUI export placed in `server/datasets/incoming/`
+(gitignored).
 
 ```bash
 npm install
-npm run dev      # http://localhost:5180
+VITE_API_URL=http://localhost:8000 npm run dev   # http://localhost:5180
 npm run build    # typecheck + production build
 ```
 
 ## Routes
 - `/`: Explorer (question, mode, graph, Steps / Context / Answer, metrics)
+- `/compare`: the same query across techniques, side by side
 - `/prospector`: data-source browser. Selecting a dataset sets what the Explorer
   queries, and "show on graph" highlights a document's entities.
+- `/agent`: Ping cycle observer. Replay a real chat or type to the chat model, and
+  watch each turn's stages (profile, L1 check, gate, dive, suggestion, follow-ups)
+  over the metadata graph
+- `/live`: feed of chime-in calls as they arrive
+- `/doc?doc=&dataset=`: one indexed record, readable (Ping's cards link here)
 
 ## The backend seam
-**`src/lib/api.ts` is the only data source.** To swap in a real backend, replace
-the bodies of `getGraph`, `runRetrieval`, `listDatasets` and `listDocuments`.
-Keep the types and signatures as they are. Nothing else needs to change.
+**`src/lib/api.ts` is the only data source**: every page talks to the backend
+through it, so its types are the contract between the two.
 
 Optional fields beyond the original contract (the UI degrades gracefully without them):
 

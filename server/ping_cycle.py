@@ -10,18 +10,24 @@ Per user turn, eight stages (each recorded, so the Agent page can show them):
   2 update    LLM updates the profile from the new message only: goal, stage,
               who/what/why, which follow-up (if any) the user took (1.a), and whether
               the message supports or contradicts each hypothesis (1.b); new
-              hypotheses for needs not covered, retire dead ones
+              hypotheses for needs not covered, retire dead ones. It sees only the
+              record names the user wrote or was already shown (_known_records), so
+              hypotheses describe what would help instead of naming catalog entries
   3 check L1  every live hypothesis against the metadata graph, deterministically
               (agent_loop._validate: names the user said, records that exist,
               non-empty scope, rewrite agrees with the user's words)
-  4 probe     LLM writes the 3 follow-ups shown after the reply: each useful on its
-              own, and where possible one that tells open hypotheses apart
-  5 gate      suggest only if the top hypothesis is confident, held up on L1 this
+  4 gate      suggest only if the top hypothesis is confident, held up on L1 this
               turn, was confirmed by the user (a follow-up taken, or a supporting
-              message), the conversation is about work, and it isn't a repeat
-  6 dive L2   scoped retrieval for the top hypothesis + the evidence check
-              (agent_loop._execute / _dive_and_check)
-  7 suggest   one record, framed by kind (artifact / insight / idea), with the reason
+              message), the conversation is about work, and it isn't a repeat;
+              falls through to the next passing hypothesis
+  5 dive L2   scoped retrieval for the top hypothesis + the evidence check
+              (agent_loop._execute / _dive_and_check), limited to records the
+              user's own words rank highly (OWN_TOP / PARTIAL_TOP)
+  6 suggest   one record, framed by kind (artifact / insight / idea), with the reason
+     (typed sessions: the chat model replies here, with Ping's find as background)
+  7 probe     LLM writes the 3 follow-ups shown after the reply, in the user's voice:
+              each useful on its own, and where possible leaning toward different
+              open hypotheses so the pick tells them apart
   8 learn     confidence snapshot and what changed this turn
 
 Confidence: support +0.15 (+0.30 when it came through a follow-up the user took),
@@ -44,10 +50,9 @@ from __future__ import annotations
 import asyncio
 import re
 import itertools
-import json
 import time
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel

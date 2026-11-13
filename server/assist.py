@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel, Field
 
 import datasets as DS
@@ -344,7 +344,6 @@ async def _assist(req: AssistRequest):
                    "stat": f"excluding {len(exclude)} doc(s)", "ms": retrieval["time_ms"]})
 
     # candidates: distinct docs, best-ranked chunk first, not already suggested
-    titles = _doc_titles(ds)
     seen, cands = set(req.already_suggested), []
     for r in retrieval["results"]:
         if r["id"] in seen:
