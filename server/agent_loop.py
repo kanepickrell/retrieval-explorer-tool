@@ -169,9 +169,9 @@ class AgentRun:
 
 # ───────────────────────── LLM steps ─────────────────────────
 
-async def _llm_json(prompt: str, system: str) -> dict:
+async def _llm_json(prompt: str, system: str, model: str = None) -> dict:
     from retrieval import lightrag_provider as lp
-    out = await lp.llm(prompt, system_prompt=system)
+    out = await lp.llm(prompt, system_prompt=system, model=model)
     m = re.search(r"\{.*\}", out or "", re.S)
     try:
         v = json.loads(m.group(0)) if m else {}
@@ -230,12 +230,22 @@ Reply with JSON only: {{"note": "<what you changed and why, one sentence>", "hyp
 _CHECK_PROMPT = """GOAL: {goal}
 NEED: {need}
 HYPOTHESIS: {claim}
+WHAT THE USER ACTUALLY SAID: {user}
 
 Excerpts retrieved from the knowledge base:
 {excerpts}
 
-Does this evidence give the user what they need? Reply with JSON only:
+Does this evidence give the user what they need? It must be about the user's situation as they
+described it: the same system and the same circumstances (when it happens, what changed, what they
+already tried). An excerpt about a similar symptom with a different setup or cause is "no", even if
+it sounds close; "partial" means it is about the user's situation but only covers part of the need.
+Reply with JSON only:
 {{"verdict": "answers" | "partial" | "no", "best": <number of the most useful excerpt, 0 if none>, "why": "<one sentence>"}}"""
+
+
+def _judge_model() -> str:
+    from retrieval import lightrag_provider as lp
+    return lp.JUDGE_LLM
 
 
 def _convo(turns: List[dict]) -> str:
@@ -596,8 +606,10 @@ async def _dive_and_check(run: AgentRun, L: dict, goal: dict, h: dict, docs: Lis
     run.emit("evidence", f"Read the top {len(ev)} doc(s)", "best passage of each, from the chunk index",
              evidence=ev)
     excerpts = "\n\n".join(f"[{i}] {e['title']}\n{e['excerpt']}" for i, e in enumerate(ev, 1))
-    v = await _llm_json(_CHECK_PROMPT.format(goal=goal["goal"], need=goal["need"], claim=h["claim"], excerpts=excerpts),
-                        "You check whether retrieved evidence meets a stated need. Output JSON only.")
+    v = await _llm_json(_CHECK_PROMPT.format(goal=goal["goal"], need=goal["need"], claim=h["claim"], excerpts=excerpts,
+                                         user=(user_q or "")[-1200:]),
+                        "You check whether retrieved evidence meets a stated need. Output JSON only.",
+                        model=_judge_model())
     verdict = v.get("verdict") if v.get("verdict") in ("answers", "partial", "no") else "partial"
     try:
         best = int(v.get("best") or 0)

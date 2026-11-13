@@ -8,8 +8,8 @@ LightRAG storage and gold eval set live.
                        (built by ingest/build_index.py); gold = eval_set.json,
                        docs = docs/
   <export>~<variant>   each storage-<variant>/ dir in the same export: an alternative
-                       index of the same docs (e.g. storage-structured = a different
-                       chunker), sharing the export's gold set, for side-by-side tests.
+                       index of the same docs (e.g. storage-metadata = one card per
+                       record), sharing the export's gold set, for side-by-side tests.
                        Underscore names (storage_v2, storage_backup...) are ignored.
 
 Status comes from LightRAG's own doc-status store, so a dataset whose index is

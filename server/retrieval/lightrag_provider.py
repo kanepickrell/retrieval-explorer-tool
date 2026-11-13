@@ -14,6 +14,8 @@ Config (env), shared with vector_provider where sensible:
   PROTOGRAPH_EMBED_HOST      Ollama host (default: http://10.128.241.200:11434)
   PROTOGRAPH_EMBED_MODEL     default: nomic-embed-text
   PROTOGRAPH_LLM             default: gemma3:12b
+  PROTOGRAPH_JUDGE_LLM       default: gpt-oss:20b  (the evidence check only; gemma3 misjudged
+                             similar-symptom records as answers, gpt-oss rejected them)
   PROTOGRAPH_LIGHTRAG_MODE   default: mix
 """
 from __future__ import annotations
@@ -29,11 +31,14 @@ from lightrag import LightRAG, QueryParam
 from lightrag.utils import EmbeddingFunc
 import lightrag.operate as op
 
+from retrieval import llm_stats
+
 _DEFAULT_STORAGE = r"C:\repos\lightrag-explainer\agenthub_storage"
 STORAGE_DIR = os.getenv("PROTOGRAPH_CORPUS_STORAGE", _DEFAULT_STORAGE)
 HOST = os.getenv("PROTOGRAPH_EMBED_HOST", "http://10.128.241.200:11434")
 EMBED = os.getenv("PROTOGRAPH_EMBED_MODEL", "nomic-embed-text")
 LLM = os.getenv("PROTOGRAPH_LLM", "gemma3:12b")
+JUDGE_LLM = os.getenv("PROTOGRAPH_JUDGE_LLM", "gpt-oss:20b")
 MODE = os.getenv("PROTOGRAPH_LIGHTRAG_MODE", "mix")
 NUM_CTX = 16384
 
@@ -79,18 +84,28 @@ def _title_of(c: dict) -> str:
     return (c.get("content", "") or "").split("\n", 1)[0].strip()
 
 
-async def _ollama_llm(prompt, system_prompt=None, history_messages=None, **kwargs):
+async def _ollama_llm(prompt, system_prompt=None, history_messages=None, model=None, **kwargs):
     msgs = []
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})
     msgs += list(history_messages or [])
     msgs.append({"role": "user", "content": prompt})
-    body = {"model": LLM, "messages": msgs, "stream": False,
+    model = model or LLM
+    body = {"model": model, "messages": msgs, "stream": False,
             "options": {"num_ctx": NUM_CTX, "temperature": 0.0}, "keep_alive": "30m"}
-    async with _SESSION.post(f"{HOST}/api/chat", json=body,
-                             timeout=aiohttp.ClientTimeout(total=900)) as r:
-        d = await r.json()
-    return d.get("message", {}).get("content", "")
+    t0, d = time.perf_counter(), {}
+    try:
+        async with _SESSION.post(f"{HOST}/api/chat", json=body,
+                                 timeout=aiohttp.ClientTimeout(total=900)) as r:
+            d = await r.json()
+    except BaseException as e:   # incl. cancellation: a timed-out caller still shows up
+        llm_stats.record("llm", model, llm_stats.task_of(system_prompt), t0, False, f"{type(e).__name__}: {e}"[:160],
+                         prompt_chars=sum(len(m["content"]) for m in msgs))
+        raise
+    out = d.get("message", {}).get("content", "")
+    llm_stats.record("llm", model, llm_stats.task_of(system_prompt), t0, not d.get("error"), d.get("error"),
+                     prompt_chars=sum(len(m["content"]) for m in msgs), out_chars=len(out or ""), ollama=d)
+    return out
 
 
 async def _ollama_embed(texts, **kwargs):
@@ -347,11 +362,11 @@ _GEN_SYS = (
 )
 
 
-async def llm(prompt: str, system_prompt: str = None) -> str:
+async def llm(prompt: str, system_prompt: str = None, model: str = None) -> str:
     """Public one-shot LLM call on the same model the graph modes use. For the
     metrics judge, so Ragas-style scores use the same gemma3 as generation."""
     await _ensure_session()
-    return await _ollama_llm(prompt, system_prompt=system_prompt)
+    return await _ollama_llm(prompt, system_prompt=system_prompt, model=model)
 
 
 async def embed(texts, as_query: bool = False):

@@ -19,13 +19,8 @@ Windows hardening (both seen in practice):
 Content duplicates (the same text under another id) are left alone: LightRAG
 indexes that text once under the original id.
 
---chunker structured uses ingest/structured_chunker.py (structure-aware splits +
-a per-chunk context header) instead of LightRAG's fixed 500-token windows; every
-other setting stays identical, so the two indexes differ only in chunking.
-
 Usage:
   python build_index.py <docs_dir> <storage_dir> [--max-async N] [--retry-failed]
-                        [--chunker default|structured]
 """
 from __future__ import annotations
 
@@ -110,17 +105,10 @@ def _failed_doc_ids(storage_dir: str) -> tuple:
     return failed, stale_dups
 
 
-async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bool = False,
-               chunker: str = "default") -> None:
+async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bool = False) -> None:
     docs = sorted(Path(docs_dir).glob("*.md"))
     Path(storage_dir).mkdir(parents=True, exist_ok=True)
-    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={lp.LLM} embed={lp.EMBED} host={lp.HOST} "
-          f"chunker={chunker}", flush=True)
-    extra = {}
-    if chunker == "structured":
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from structured_chunker import structured_chunking
-        extra["chunking_func"] = structured_chunking
+    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={lp.LLM} embed={lp.EMBED} host={lp.HOST}", flush=True)
 
     lp._SESSION = aiohttp.ClientSession()
     rag = LightRAG(
@@ -130,7 +118,6 @@ async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bo
                                      func=_embed, model_name=lp.EMBED),
         chunk_token_size=500, chunk_overlap_token_size=50,
         llm_model_max_async=max_async, enable_llm_cache=True,
-        **extra,
     )
     await rag.initialize_storages()
     failed, stale = _failed_doc_ids(storage_dir)
@@ -168,6 +155,5 @@ if __name__ == "__main__":
     ap.add_argument("--max-async", type=int, default=4)
     ap.add_argument("--retry-failed", action="store_true",
                     help="delete failed doc records and re-insert just those docs")
-    ap.add_argument("--chunker", choices=["default", "structured"], default="default")
     a = ap.parse_args()
-    asyncio.run(main(a.docs_dir, os.path.abspath(a.storage_dir), a.max_async, a.retry_failed, a.chunker))
+    asyncio.run(main(a.docs_dir, os.path.abspath(a.storage_dir), a.max_async, a.retry_failed))

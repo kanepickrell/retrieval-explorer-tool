@@ -12,6 +12,7 @@ synthetic Agent Hub corpus and any pseudonymized Agent Hub / Open WebUI export i
 | `GET /api/search/answer`, `GET /api/search/metrics` | the generated answer for a run, and its Ragas-style metrics + recall@k |
 | `POST /api/assist`, `GET /api/assist/chats` | one chime-in decision for a conversation; replayable export chats |
 | `GET /api/live` | feed of chime-in calls (the Live page) |
+| `GET /api/llm/stats` | every LLM / query-embedding call to Ollama: per-task latency, failures, empty replies, model reloads |
 | `POST /api/agent/run`, `GET /api/agent/runs[/{id}[/graph]]` | routing agent runs and their step-by-step events |
 | `/api/ping/chats`, `/api/ping/sessions[/{id}[/next\|/say]]` | Ping cycle sessions: replay a real chat or type to the chat model; per-turn stages (the Agent page) |
 
@@ -33,7 +34,8 @@ Config (env):
 |---|---|---|
 | `PROTOGRAPH_CORPUS_STORAGE` | `C:\repos\lightrag-explainer\agenthub_storage` | LightRAG storage (graphml + chunk vdb) |
 | `PROTOGRAPH_EMBED_HOST` | `http://10.128.241.200:11434` | Ollama embed/chat host |
-| `PROTOGRAPH_LLM` | `gemma3:12b` | LightRAG generation model |
+| `PROTOGRAPH_LLM` | `gemma3:12b` | generation model: LightRAG, Ping's profile and follow-ups, the chat model |
+| `PROTOGRAPH_JUDGE_LLM` | `gpt-oss:20b` | the evidence check (agent and Ping) |
 | `PORT` | `8000` | listen port |
 
 Point the frontend at it with `VITE_API_URL` (see `../.env`).

@@ -140,6 +140,13 @@ def graph(dataset: str | None = Query(None)):
     return _load_corpus_graph(dataset)
 
 
+@app.get("/api/llm/stats")
+def llm_stats_(last: int = Query(30, ge=0, le=500)):
+    """Every LLM / query-embedding call to Ollama: per-task latency, failures, reloads."""
+    from retrieval import llm_stats
+    return llm_stats.summary(last)
+
+
 @app.get("/api/graph/stats")
 def graph_stats(dataset: str | None = Query(None)):
     g = _load_corpus_graph(dataset)

@@ -66,10 +66,10 @@ STAGES = ["observe", "update", "check", "gate", "dive", "suggest", "probe", "lea
 MAX_SESSIONS = 30
 MAX_ACTIVE = 4                 # live hypotheses kept
 NEW_CONF = 0.35
-ASKED_CONF = 0.60
-PARTIAL_TOP = 3                # ...and a "might help" (partial) one among the top 3
+ASKED_CONF = 0.60              # a new hypothesis the user asked for outright starts confirmed, near the gate
 OWN_TOP = 7                    # a suggestion must be among the top records the user's own words find
-PREFER = {"idea": ("agent-", "tool-", "step-"), "insight": ("chat-",)}   # record kinds each hypothesis kind is after              # a new hypothesis the user asked for outright starts confirmed, near the gate
+PARTIAL_TOP = 3                # ...and a "might help" (partial) one among the top 3
+PREFER = {"idea": ("agent-", "tool-", "step-"), "insight": ("chat-",)}   # record kinds each hypothesis kind is after
 GATE_CONF = 0.65
 MIN_AGREE = 2                  # an unscoped hypothesis holds up only if its search shares 2+ of the top 5 docs with the user's own words
 ECHO_SIM = 0.85                # a message this close to a follow-up counts as taking it
@@ -293,6 +293,25 @@ def _mentioned(name: str, text: str) -> bool:
     return len(n) >= 3 and f" {n} " in f" {text} "
 
 
+_TEAM_WORDS = r"(?:team|teams|folks|group|guys|people|side|shop)"
+
+
+def _team_named(L: dict, team: str, said: str) -> bool:
+    """Did the user refer to this team as a team? Team names can be ordinary words ("Range",
+    "Automation"), so the bare word doesn't count: it takes "the Range team", "team Range",
+    "Automation folks"... An acronym name (OPFOR) counts on its own."""
+    G = L["G"]
+    names = [n.split(": ", 1)[-1] for n, d in G.nodes(data=True) if d.get("entity_type") == "Team"]
+    name = next((n for n in names if A._norm(n) == A._norm(team)), None)
+    if not name:
+        return True          # not one of the graph's teams: _resolve reports it as missing
+    w = re.escape(A._norm(name))
+    text = A._norm(said)
+    if name.isupper() and re.search(rf"\b{w}\b", text):
+        return True
+    return bool(re.search(rf"\b{w}\s+{_TEAM_WORDS}\b|\bteam\s+{w}\b", text))
+
+
 def _known_records(L: dict, s: Session) -> str:
     """The record names Ping's profile may use: only those the user wrote, or was already
     shown in a chime-in. Handing it the whole catalog leaked answers into hypotheses
@@ -418,7 +437,8 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         asked = src.get("asked") is True   # the user asked for exactly this: that is the confirmation
         conf = ASKED_CONF if asked else NEW_CONF
         h = {**raw, "id": f"h{next(s._hid)}", "kind": kind if kind in KINDS else "artifact", "confidence": conf,
-             "status": "active", "born": turn, "confirmed": asked, "history": [], "l1": None, "top_streak": 0}
+             "status": "active", "born": turn, "confirmed": asked, "history": [], "l1": None, "top_streak": 0,
+             "asked_turn": turn if asked else None}
         h["history"].append({"turn": turn, "delta": conf, "source": "asked" if asked else "new",
                              "why": "the user asked for this directly" if asked else "proposed", "conf": conf})
         P["hypotheses"].append(h)
@@ -447,7 +467,12 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     # hypothesis look like it drifted.
     user_words = _clip(" ".join([t["content"] for t in s.turns if t["role"] == "user"][-3:]), 700)
     checks, focus = [], {"hyps": {}}
+    said = " ".join(t["content"] for t in s.turns if t["role"] == "user")
     for h in _live(s):
+        teams = h["scope"].get("teams") or []
+        kept = [t for t in teams if _team_named(L, t, said)]
+        if len(kept) < len(teams):   # "range rehearsals" is a cyber range, not the Range team
+            h["scope"]["teams"] = kept
         if h["kind"] == "insight" and h["answer_type"] == "records" and not any(h["scope"].get(k) for k in ("users", "teams", "agents", "files", "chats")):
             h["answer_type"], h["target"] = "document", "chat"   # "how did others handle it": search past chats
         v = await asyncio.to_thread(A._validate, L, {k: h[k] for k in ("claim", "answer_type", "target", "scope", "query")},
@@ -493,16 +518,21 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
              "value": "a supporting message or follow-up" if h.get("confirmed") else "not yet"},
             {"name": "not a repeat", "ok": not any((c.get("suggestion") or {}).get("hypothesis") == h["id"] for c in s.cycles[-3:-1]),
              "value": "no suggestion from it in the last 2 turns"},
+            {"name": "not a dead end", "ok": h.get("dry") != h["query"],
+             "value": "its last dive, with this same query, surfaced nothing" if h.get("dry") == h["query"] else "ok"},
         ]
 
-    ranked = sorted(_live(s), key=lambda h: -h["confidence"])
+    # what the user explicitly asked for this turn goes first, then by confidence: otherwise an
+    # older hypothesis at 1.0 answers "is there a script for X?" with its own, staler need
+    ranked = sorted(_live(s), key=lambda h: (h.get("asked_turn") != turn, -h["confidence"]))
     tried = [(h, criteria(h)) for h in ranked]
     passing = next(((h, c) for h, c in tried if all(x["ok"] for x in c)), None)
     gate_h, crit = passing or (tried[0] if tried else (None, []))
     open_ = passing is not None
     fell = open_ and top and gate_h["id"] != top["id"]
     _stage(cycle, "gate", "done",
-           (f"Open: acting on {gate_h['id']}" + (f" (top {top['id']} was just used)" if fell else "")) if open_ else "Closed: keep listening",
+           (f"Open: acting on {gate_h['id']}" + (" (what the user just asked for)" if gate_h.get("asked_turn") == turn and fell
+                                                  else f" (top {top['id']} was just used)" if fell else "")) if open_ else "Closed: keep listening",
            f"{sum(c['ok'] for c in crit)} of {len(crit)} criteria for {gate_h['id']}" if gate_h else "no hypothesis yet", t0,
            open=open_, criteria=crit, hypothesis=gate_h and gate_h["id"],
            others=[{"id": h["id"], "failed": [x["name"] for x in c if not x["ok"]]} for h, c in tried if h is not gate_h])
@@ -524,7 +554,11 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         on = [d for d in docs if L["alias"].get(d["doc"], d["doc"]) in own_top]
         log.emit("guard", f"{len(on)} of {len(docs)} candidates are on-topic",
                  f"kept only records among the top {OWN_TOP} for the user's own recent messages")
-        docs = on
+        # The hypothesis decides when to look and what kind of record; the user's own words decide
+        # the order the judge reads them in. A hypothesis-written query ranks worse than the user's
+        # words (hit@5 0.777 vs 0.816 on the gold set), and the judge only reads the top few: a
+        # query like "long-running range config" buried the Sliver chat the user's words rank #1.
+        docs = sorted(on, key=lambda d: own_top.index(L["alias"].get(d["doc"], d["doc"])))
         pref = PREFER.get(h["kind"])
         if pref:   # an idea is answered by an agent/tool/step, an insight by someone's chat: when the search
             mine = [d for d in docs if d["doc"].startswith(pref)]   # found any, only those go to the check
@@ -572,6 +606,12 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
                     "Stayed quiet: only a partial match, and not among the user's top few records" if chk["verdict"] == "partial" else
                     f"Stayed quiet: the evidence check said {chk['verdict']}") if pick else "Stayed quiet: nothing new to suggest",
                    chk.get("why", ""), t0, check=chk)
+        # a dive that surfaced nothing is a dead end for this query: the gate passes over it next
+        # turn (and tries the next hypothesis) until the hypothesis' query changes
+        if cycle["suggestion"]:
+            h.pop("dry", None)
+        else:
+            h["dry"] = h["query"]
 
     # the chat model answers now, after Ping's suggest, so it can use what Ping found
     if chat:

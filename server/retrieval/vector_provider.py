@@ -85,16 +85,22 @@ def _embed_query(text: str) -> Optional[List[float]]:
         return _QVEC[text]
     if not embed_available():
         return None
+    from retrieval import llm_stats
+    t0 = time.perf_counter()
     try:
         res = httpx.post(f"{EMBED_HOST}/api/embed",
                          json={"model": EMBED_MODEL, "input": ["search_query: " + text]},
                          timeout=30.0)
         if res.status_code != 200:
             _EMBED_DOWN_UNTIL = time.time() + EMBED_RETRY_S
+            llm_stats.record("embed", EMBED_MODEL, "query embedding", t0, False, f"HTTP {res.status_code}", len(text))
             return None
-        vec = res.json()["embeddings"][0]
-    except Exception:
+        d = res.json()
+        vec = d["embeddings"][0]
+        llm_stats.record("embed", EMBED_MODEL, "query embedding", t0, True, prompt_chars=len(text), ollama=d)
+    except Exception as e:
         _EMBED_DOWN_UNTIL = time.time() + EMBED_RETRY_S
+        llm_stats.record("embed", EMBED_MODEL, "query embedding", t0, False, f"{type(e).__name__}: {e}"[:160], len(text))
         return None
     norm = sum(x * x for x in vec) ** 0.5
     if norm == 0.0:
