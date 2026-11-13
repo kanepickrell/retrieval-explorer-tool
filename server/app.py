@@ -1,22 +1,19 @@
 """
 Retrieval Explorer backend (corpus RAG, GraphDB-free).
 
-Serves exactly what the frontend's src/lib/api.ts consumes:
-  GET /graph                      -> corpus knowledge graph {nodes, edges}
-  GET /api/search/unified?q=...   -> retrieval over the corpus (vector + LightRAG)
-     &limit=..&force_strategy=vector|local|global|hybrid|mix
+Serves what the frontend's src/lib/api.ts consumes (the full list is in README.md):
+  GET /datasets, /documents, /graph   the datasets, their docs and knowledge graphs
+  GET /api/search/unified?q=...       retrieval: vector | bm25 | bm25_vector | agent
+  /api/assist, /api/live, /api/agent, /api/ping, /api/llm/stats
 
-It reads the synthetic Agent Hub corpus only (LightRAG storage on disk + an
-Ollama embed/chat host). It never touches GraphDB / the pb-kane graph, so no
-real user data is exposed.
+It reads the datasets under datasets/ (index storage on disk) and an Ollama host;
+it never touches GraphDB. Self-contained: the retrieval providers live beside this
+file -- nothing is imported from another repo. Config via env:
 
-Self-contained: the retrieval providers (graph_search / unified_search /
-retrieval/*) live beside this file -- nothing is imported from another repo.
-Config via env:
-
-  PROTOGRAPH_CORPUS_STORAGE  LightRAG storage dir   (default C:\\repos\\lightrag-explainer\\agenthub_storage)
+  PROTOGRAPH_CORPUS_STORAGE  storage of the synthetic corpus (default C:\\repos\\lightrag-explainer\\agenthub_storage)
   PROTOGRAPH_EMBED_HOST      Ollama embed/chat host (default http://10.128.241.200:11434)
-  PROTOGRAPH_LLM             LightRAG generation model (default gemma3:12b)
+  PROTOGRAPH_LLM             generation model (default gemma3:12b)
+  PROTOGRAPH_JUDGE_LLM       evidence-check model (default gpt-oss:20b)
 
 Run (see requirements.txt for deps):
   uvicorn app:app --host 0.0.0.0 --port 8000
@@ -36,14 +33,13 @@ if _HERE not in sys.path:
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-from graph_search import init_graph_search, router as search_router  # noqa: E402
+from graph_search import router as search_router  # noqa: E402
 import datasets as DS  # noqa: E402
 
 app = FastAPI(title="Retrieval Explorer backend")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
-init_graph_search(None)          # retrieval is corpus-backed; no GraphDB handle needed
 app.include_router(search_router)  # mounts /api/search/unified and friends
 from assist import router as assist_router  # noqa: E402
 app.include_router(assist_router)  # /api/assist (chime-in)

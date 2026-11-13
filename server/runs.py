@@ -28,13 +28,10 @@ class Run:
     query: str
     strategy: str
     limit: int
-    top_k: Optional[int]
     retrieved_ids: List[str]          # doc ids in rank order (recall@k is doc-level)
     contexts: List[str]               # chunk texts in the final context (judge input)
-    context_text: str                 # everything the generator sees (KG + chunks for LightRAG)
-    system_prompt: Optional[str]      # LightRAG's exact answer prompt; None for vector
+    context_text: str                 # everything the generator sees
     retrieval_ms: float
-    keywords_cached: Optional[bool] = None   # None for vector (no keyword step)
     created_at: float = field(default_factory=time.time)
     answer: Optional[str] = None
     answer_ms: Optional[float] = None

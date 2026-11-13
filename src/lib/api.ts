@@ -18,29 +18,24 @@
 
 // ───────────────────────── Types (the contract) ─────────────────────────
 
-export type Technique = "vector" | "bm25" | "bm25_vector" | "local" | "global" | "hybrid" | "mix" | "agent";
+export type Technique = "vector" | "bm25" | "bm25_vector" | "agent";
 export type GraphNode = { id: string; label: string; cluster: string; type: string; size: number; description?: string };
 export type GraphEdge = { id: string; source: string; target: string; weight: number; label?: string };
 export type Step = { label: string; detail: string; stat?: string; ms?: number };
 /** One retrieved document (its best/first chunk). score = cosine(query, chunk) with the
  *  same embeddings for every technique (null if the chunk has no embedding); `via` is how
- *  it was reached: E = entity, R = relation (LightRAG), C = vector search, B = BM25
- *  keyword match, B+C = found by both BM25 and vector (fusion). */
+ *  it was reached: E = graph (agent), C = vector search, B = BM25 keyword match,
+ *  B+C = found by both BM25 and vector (fusion). */
 export type Chunk = {
   id: string; title: string; source: string; score: number | null; rank: number;
-  via?: "E" | "R" | "C" | "B" | "B+C"; snippet?: string; entities?: string[];
+  via?: "E" | "C" | "B" | "B+C"; snippet?: string; entities?: string[];
 };
 export type Metric = { key: string; label: string; value: number; referenceBased: boolean; pending?: boolean };
 export type RetrievalResult = {
   /** backend run id: answer + metrics are computed on exactly this retrieval */
   runId: string;
   strategy: Technique; timeMs: number;
-  /** graph modes: true if keyword extraction was skipped (cache hit), false if it ran
-   *  (cold LLM call); null for vector, which has no keyword step */
-  keywordsCached: boolean | null;
-  /** time spent obtaining keywords (null for vector); timeMs - keywordMs = the search itself */
-  keywordMs: number | null;
-  graph: { nodes: GraphNode[]; edges: GraphEdge[] }; // touched subgraph; empty for vector
+  graph: { nodes: GraphNode[]; edges: GraphEdge[] }; // touched subgraph (agent, metadata datasets); else empty
   chunks: Chunk[]; steps: Step[]; answer: string; metrics: Metric[];
   note?: string;
 };
@@ -68,11 +63,10 @@ export type DocumentSummary = {
 };
 export type DocChunk = { id: string; order: number; tokens: number; content: string; entities: string[] };
 
-export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "local", "global", "hybrid", "mix", "agent"];
+export const TECHNIQUES: Technique[] = ["vector", "bm25", "bm25_vector", "agent"];
 /** display names (ids are URL-safe) */
 export const TECHNIQUE_LABEL: Record<Technique, string> = {
-  vector: "vector", bm25: "bm25", bm25_vector: "bm25+vector",
-  local: "local", global: "global", hybrid: "hybrid", mix: "mix", agent: "agent",
+  vector: "vector", bm25: "bm25", bm25_vector: "bm25+vector", agent: "agent",
 };
 
 export class ApiError extends Error {
@@ -168,19 +162,18 @@ export async function runRetrieval(
   datasetId: string,
   query: string,
   technique: Technique,
-  topK: number,
   chunkTopK: number,
 ): Promise<RetrievalResult> {
   const d = await getJson("/api/search/unified", {
-    q: query, limit: chunkTopK, top_k: topK, force_strategy: technique, dataset: datasetId,
+    q: query, limit: chunkTopK, force_strategy: technique, dataset: datasetId,
   });
-  return mapResult(d, technique, topK, chunkTopK);
+  return mapResult(d, technique, chunkTopK);
 }
 
 /** Map the backend's unified-search response onto RetrievalResult.
  *  Graph, chunks, scores, steps and timings are all measured by the backend. Quality metrics start
  *  `pending`; they are computed on demand by evaluate(). */
-function mapResult(d: any, technique: Technique, _topK: number, chunkTopK: number): RetrievalResult {
+function mapResult(d: any, technique: Technique, chunkTopK: number): RetrievalResult {
   const g = d?.graph ?? { nodes: [], edges: [] };
   const nodes: GraphNode[] = (g.nodes ?? []).map((n: any) => ({
     id: String(n.id),
@@ -208,8 +201,6 @@ function mapResult(d: any, technique: Technique, _topK: number, chunkTopK: numbe
   }));
   return {
     runId: String(d?.run_id ?? ""),
-    keywordsCached: typeof d?.keywords_cached === "boolean" ? d.keywords_cached : null,
-    keywordMs: typeof d?.keyword_ms === "number" ? Math.round(d.keyword_ms) : null,
     strategy: technique, timeMs, graph: { nodes, edges }, chunks, steps, answer: "", metrics: pendingMetrics(),
     note: d?.note ? String(d.note) : undefined,
   };
@@ -308,7 +299,7 @@ const mapSuggestion = (x: any): AssistSuggestion => ({
 
 export async function assist(opts: {
   datasetId: string; turns: ChatTurn[]; technique: Technique; queryStrategy: QueryStrategy;
-  limit: number; topK: number; llmFilter: boolean; minScore: number;
+  limit: number; llmFilter: boolean; minScore: number;
   excludeDocs: string[]; alreadySuggested: string[];
 }): Promise<AssistResult> {
   let r: Response;
@@ -317,7 +308,7 @@ export async function assist(opts: {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         dataset: opts.datasetId, turns: opts.turns, technique: opts.technique, query_strategy: opts.queryStrategy,
-        limit: opts.limit, top_k: opts.topK, llm_filter: opts.llmFilter, min_score: opts.minScore,
+        limit: opts.limit, llm_filter: opts.llmFilter, min_score: opts.minScore,
         exclude_docs: opts.excludeDocs, already_suggested: opts.alreadySuggested,
       }),
     });
@@ -325,15 +316,15 @@ export async function assist(opts: {
     throw new ApiError(`backend unreachable at ${API_BASE}`);
   }
   if (!r.ok) throw new ApiError(`/api/assist → ${r.status}`);
-  return mapAssist(await r.json(), opts.technique, opts.topK, opts.limit);
+  return mapAssist(await r.json(), opts.technique, opts.limit);
 }
 
-function mapAssist(d: any, technique: Technique, topK: number, limit: number): AssistResult {
+function mapAssist(d: any, technique: Technique, limit: number): AssistResult {
   return {
     query: d.query ?? null, stayQuiet: !!d.stay_quiet, reason: d.reason ?? null,
     suggestions: (d.suggestions ?? []).map(mapSuggestion), candidates: (d.candidates ?? []).map(mapSuggestion),
     stages: d.stages ?? [], totalMs: Math.round(Number(d.total_ms ?? 0)),
-    retrieval: d.retrieval ? mapResult(d.retrieval, technique, topK, limit) : null,
+    retrieval: d.retrieval ? mapResult(d.retrieval, technique, limit) : null,
   };
 }
 
@@ -355,7 +346,7 @@ export async function listLive(after: number): Promise<{ latest: number; events:
       seq: Number(e.seq), at: Number(e.at), source: e.source ?? "other", dataset: e.dataset ?? null,
       technique: e.technique, queryStrategy: e.query_strategy, llmFilter: !!e.llm_filter, minScore: Number(e.min_score),
       turns: e.turns ?? [], error: e.error ?? null,
-      result: e.error ? null : mapAssist(e.response ?? {}, e.technique, Number(e.top_k ?? 0), Number(e.limit ?? 5)),
+      result: e.error ? null : mapAssist(e.response ?? {}, e.technique, Number(e.limit ?? 5)),
     })),
   };
 }

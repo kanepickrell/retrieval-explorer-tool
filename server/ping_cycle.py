@@ -701,10 +701,10 @@ class Say(BaseModel):
 
 
 def _state(s: Session) -> dict:
-    from retrieval import lightrag_provider as lp
+    from retrieval import ollama_client as ollama
     return {**s.summary(), "error": s.error, "chat": s.chat and {k: s.chat[k] for k in ("chat_id", "doc", "title", "author")},
             "turns": s.turns, "profile": s.profile, "cycles": s.cycles, "stages": STAGES,
-            "pending": s.pending, "chat_model": lp.LLM}
+            "pending": s.pending, "chat_model": ollama.LLM}
 
 
 # The chat model the user talks to: a plain assistant, as in Open WebUI. It never mentions Ping:
@@ -721,8 +721,8 @@ def _finding_lines(f: dict) -> str:
 
 
 async def _chat_reply(s: Session, msg: str, finding: Optional[dict] = None, earlier: Optional[list] = None) -> str:
-    from retrieval import lightrag_provider as lp
-    await lp._ensure_session()
+    from retrieval import ollama_client as ollama
+    await ollama._ensure_session()
     turns = s.turns[:-1] if s.turns and s.turns[-1]["role"] == "user" and s.turns[-1]["content"] == msg else s.turns
     hist = [{"role": t["role"], "content": t["content"][:4000]} for t in turns[-8:]]
     system = CHAT_SYSTEM
@@ -740,7 +740,7 @@ async def _chat_reply(s: Session, msg: str, finding: Optional[dict] = None, earl
     if earlier or finding:
         system += (" Never mention an assistant, a tool, a search or a 'knowledge base', never write links or placeholders, "
                    "and don't claim more than the background says.")
-    out = await lp._ollama_llm(msg, system_prompt=system, history_messages=hist)
+    out = await ollama._ollama_llm(msg, system_prompt=system, history_messages=hist)
     return (out or "").strip() or "(the chat model returned nothing)"
 
 

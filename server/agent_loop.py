@@ -170,8 +170,8 @@ class AgentRun:
 # ───────────────────────── LLM steps ─────────────────────────
 
 async def _llm_json(prompt: str, system: str, model: str = None) -> dict:
-    from retrieval import lightrag_provider as lp
-    out = await lp.llm(prompt, system_prompt=system, model=model)
+    from retrieval import ollama_client as ollama
+    out = await ollama.llm(prompt, system_prompt=system, model=model)
     m = re.search(r"\{.*\}", out or "", re.S)
     try:
         v = json.loads(m.group(0)) if m else {}
@@ -244,8 +244,8 @@ Reply with JSON only:
 
 
 def _judge_model() -> str:
-    from retrieval import lightrag_provider as lp
-    return lp.JUDGE_LLM
+    from retrieval import ollama_client as ollama
+    return ollama.JUDGE_LLM
 
 
 def _convo(turns: List[dict]) -> str:

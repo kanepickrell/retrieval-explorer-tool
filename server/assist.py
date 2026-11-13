@@ -156,7 +156,6 @@ class AssistRequest(BaseModel):
     technique: str = "bm25_vector"
     query_strategy: str = Field("rewrite", pattern="^(last|window|rewrite)$")
     limit: int = Field(5, ge=1, le=20)
-    top_k: Optional[int] = Field(None, le=200)
     llm_filter: bool = True
     min_score: float = 0.5
     max_suggestions: int = Field(3, ge=1, le=10)
@@ -188,9 +187,9 @@ async def _build_query(req: AssistRequest) -> tuple:
     elif req.require_context:
         return await _gated_query(req, t0)
     else:
-        from retrieval import lightrag_provider as lp
+        from retrieval import ollama_client as ollama
         convo = _text_of(req.turns[-6:])[-4000:]
-        out = await lp.llm(
+        out = await ollama.llm(
             "Below is the latest part of a conversation between a user and an AI assistant. "
             "Write ONE standalone search query (at most 20 words) for internal documents or past "
             "conversations that would help the user with what they are doing right now. Use the "
@@ -234,9 +233,9 @@ async def _gated_query(req: AssistRequest, t0: float) -> tuple:
     The LLM only extracts; the decision is made here, because small models are
     unreliable at judging their own readiness. Search once it is work and the
     task (what) is known along with either who/what system or why/specifics."""
-    from retrieval import lightrag_provider as lp
+    from retrieval import ollama_client as ollama
     convo = _text_of(req.turns[-6:])[-4000:]
-    out = await lp.llm(_GATE_PROMPT.format(convo=convo),
+    out = await ollama.llm(_GATE_PROMPT.format(convo=convo),
                        system_prompt="You extract facts from conversations. Output JSON only.")
     m = re.search(r"\{.*\}", out or "", re.S)
     try:
@@ -283,12 +282,12 @@ _KIND = {"chat": "past chat", "file": "uploaded file", "agent": "Agent Hub agent
 
 async def _judge(req: AssistRequest, query: str, cands: List[dict]) -> List[dict]:
     """LLM marks each candidate useful (bool) with a one-line reason."""
-    from retrieval import lightrag_provider as lp
+    from retrieval import ollama_client as ollama
     convo = _text_of(req.turns[-4:])[-3000:]
     ds = DS.get(req.dataset)
     listing = "\n\n".join(f"[{i + 1}] {_KIND.get(c['doc'].split('-', 1)[0], 'document')}: {c['title']}\n"
                            f"{_judge_text(ds, c)}" for i, c in enumerate(cands))
-    out = await lp.llm(
+    out = await ollama.llm(
         "A user is in the conversation below. Each numbered excerpt comes from the team's internal "
         "knowledge base. Mark an excerpt useful ONLY if showing it to the user right now would move "
         "their task forward: it holds a concrete answer, fix, code, configuration, procedure, prior "
@@ -338,7 +337,7 @@ async def _assist(req: AssistRequest):
     exclude = set(req.exclude_docs)
     if req.curated:
         exclude |= _ping_excluded(ds)
-    retrieval = await run_unified(query, req.limit, req.technique, ds.id, req.top_k,
+    retrieval = await run_unified(query, req.limit, req.technique, ds.id,
                                   exclude_docs=exclude or None)
     stages.append({"label": f"Retrieve ({req.technique})", "detail": f"{len(retrieval['results'])} chunks",
                    "stat": f"excluding {len(exclude)} doc(s)", "ms": retrieval["time_ms"]})

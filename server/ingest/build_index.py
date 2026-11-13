@@ -1,6 +1,6 @@
 """
 Build a LightRAG index (graph + chunk vdb) from a folder of markdown docs,
-with the SAME settings the backend queries with (retrieval/lightrag_provider.py):
+with the SAME settings the backend queries with (retrieval/ollama_client.py):
 nomic-embed-text (768d, search_document:/search_query: prefixes), gemma3:12b,
 500/50-token chunks. Point the backend at the result with
 PROTOGRAPH_CORPUS_STORAGE=<storage_dir>.
@@ -38,7 +38,7 @@ import aiohttp  # noqa: E402
 from lightrag import LightRAG  # noqa: E402
 from lightrag.utils import EmbeddingFunc  # noqa: E402
 
-from retrieval import lightrag_provider as lp  # noqa: E402  (reuse its Ollama funcs + settings)
+from retrieval import ollama_client as ollama  # noqa: E402  (reuse its Ollama funcs + settings)
 
 _os_replace = os.replace
 
@@ -73,16 +73,16 @@ def _with_retry(fn, what: str, attempts: int = 4):
                 # Swap in a fresh session WITHOUT closing the old one: other calls may still
                 # be using it (llm_model_max_async > 1); closing it killed them all at once.
                 # Replaced sessions are closed at the end of the build.
-                old = lp._SESSION
+                old = ollama._SESSION
                 if old is not None and old not in _RETIRED:
                     _RETIRED.append(old)
-                    lp._SESSION = aiohttp.ClientSession()
+                    ollama._SESSION = aiohttp.ClientSession()
                 await asyncio.sleep(5 * (i + 1))
     return wrapped
 
 
-_llm = _with_retry(lp._ollama_llm, "llm call")
-_embed = _with_retry(lp._ollama_embed, "embed call")
+_llm = _with_retry(ollama._ollama_llm, "llm call")
+_embed = _with_retry(ollama._ollama_embed, "embed call")
 
 
 def _status(storage_dir: str) -> dict:
@@ -108,14 +108,14 @@ def _failed_doc_ids(storage_dir: str) -> tuple:
 async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bool = False) -> None:
     docs = sorted(Path(docs_dir).glob("*.md"))
     Path(storage_dir).mkdir(parents=True, exist_ok=True)
-    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={lp.LLM} embed={lp.EMBED} host={lp.HOST}", flush=True)
+    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={ollama.LLM} embed={ollama.EMBED} host={ollama.HOST}", flush=True)
 
-    lp._SESSION = aiohttp.ClientSession()
+    ollama._SESSION = aiohttp.ClientSession()
     rag = LightRAG(
         working_dir=storage_dir,
-        llm_model_func=_llm, llm_model_name=lp.LLM,
+        llm_model_func=_llm, llm_model_name=ollama.LLM,
         embedding_func=EmbeddingFunc(embedding_dim=768, max_token_size=2048,
-                                     func=_embed, model_name=lp.EMBED),
+                                     func=_embed, model_name=ollama.EMBED),
         chunk_token_size=500, chunk_overlap_token_size=50,
         llm_model_max_async=max_async, enable_llm_cache=True,
     )
@@ -139,7 +139,7 @@ async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bo
             print(f"[build] {i}/{len(docs)} {p.name}  {time.time()-t:.0f}s  (total {(time.time()-t0)/60:.1f} min)", flush=True)
     finally:
         await rag.finalize_storages()
-        await lp._SESSION.close()
+        await ollama._SESSION.close()
         for old in _RETIRED:
             try:
                 await old.close()

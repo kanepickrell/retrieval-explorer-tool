@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from retrieval import lightrag_provider as lp  # noqa: E402
+from retrieval import ollama_client as ollama  # noqa: E402
 
 DOC_CHARS = 9000
 MAX_OVERLAP = 0.6
@@ -99,7 +99,7 @@ def _json_array(text: str) -> list:
 async def main(export_dir: str) -> None:
     ex = Path(export_dir)
     gold = json.loads((ex / "eval_set.json").read_text(encoding="utf-8"))
-    await lp._ensure_session()
+    await ollama._ensure_session()
     out, dropped, t0 = [], [], time.time()
     try:
         for i, e in enumerate(gold, 1):
@@ -107,7 +107,7 @@ async def main(export_dir: str) -> None:
             if not chat_doc or not (ex / "docs" / chat_doc).exists():
                 continue
             doc = (ex / "docs" / chat_doc).read_text(encoding="utf-8")
-            reply = await lp.llm(PROMPT.format(first=e["query"], doc=doc[:DOC_CHARS]),
+            reply = await ollama.llm(PROMPT.format(first=e["query"], doc=doc[:DOC_CHARS]),
                                  system_prompt="You write evaluation questions for a retrieval system. Output JSON only.")
             items = _json_array(reply)
             kept = 0
@@ -133,13 +133,13 @@ async def main(export_dir: str) -> None:
                     "gold_ids": e["gold_ids"],
                     "query_type": f"generated_{kind}",
                     "source_query_id": e["id"],
-                    "generated_by": lp.LLM,
+                    "generated_by": ollama.LLM,
                     "overlap_with_original": ov,
                     "lexical_coverage": _overlap(q, doc),
                 })
             print(f"[gen] {i}/{len(gold)} {e['id']}: kept {kept}/{len(items)}  ({time.time()-t0:.0f}s)", flush=True)
     finally:
-        await lp.aclose()
+        await ollama.aclose()
     (ex / "eval_set_generated.json").write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[gen] wrote {len(out)} queries -> {ex / 'eval_set_generated.json'}", flush=True)
     for d in dropped:

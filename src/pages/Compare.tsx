@@ -40,9 +40,7 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
     rows: [
       // ranked on the search itself: keyword extraction is shared/cached across modes, so
       // whichever mode ran first would otherwise look slowest
-      { key: "latency", label: "Search latency", ranked: true, get: (r) => r.timeMs - (r.keywordMs ?? 0), fmt: (v) => `${v} ms` },
-      { key: "keyword_ms", label: "Keyword extraction", ranked: false, get: (r) => r.keywordMs, fmt: (v) => `${v} ms`,
-        note: (r) => (r.keywordsCached === null ? undefined : r.keywordsCached ? "cached" : "cold LLM") },
+      { key: "latency", label: "Search latency", ranked: true, get: (r) => r.timeMs, fmt: (v) => `${v} ms` },
       { key: "entities", label: "Entities", ranked: false, get: (r) => r.graph.nodes.length, fmt: String },
       { key: "relations", label: "Relations", ranked: false, get: (r) => r.graph.edges.length, fmt: String },
       { key: "chunks", label: "Chunks", ranked: false, get: (r) => r.chunks.length, fmt: String },
@@ -73,7 +71,7 @@ const SECTIONS: { title: string; dot?: string; referenceBased?: boolean; rows: R
 
 /** Runs the current question through every technique and ranks them side by side. */
 export default function Compare() {
-  const { datasetId, dataset, query, run, runNonce, topK, chunkTopK, setTechnique, reportError } = useExplorer();
+  const { datasetId, dataset, query, run, runNonce, chunkTopK, setTechnique, reportError } = useExplorer();
   const [input, setInput] = useState(query);
   const [rawRuns, setRuns] = useState<Runs>({});
   // metrics computed on demand per technique (LLM judge, slow) -- merged over the pending placeholders
@@ -97,12 +95,12 @@ export default function Compare() {
     let live = true;
     setLoading(true);
     setEvals({}); setEvalNotes({}); setEvaluating(null); evalRun.current++;
-    Promise.all(TECHNIQUES.map((t) => runRetrieval(datasetId, query, t, topK, chunkTopK)))
+    Promise.all(TECHNIQUES.map((t) => runRetrieval(datasetId, query, t, chunkTopK)))
       .then((rs) => { if (live) setRuns(Object.fromEntries(rs.map((r) => [r.strategy, r])) as Runs); })
       .catch((e) => { if (live) { setRuns({}); reportError(String(e.message ?? e)); } })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
-  }, [datasetId, query, runNonce, topK, chunkTopK]);
+  }, [datasetId, query, runNonce, chunkTopK]);
 
   const ready = TECHNIQUES.every((t) => runs[t]);
   // no winner until at least one technique has a computed quality metric (a real backend may report them as pending)
@@ -143,7 +141,7 @@ export default function Compare() {
       {!query ? (
         <section className="card py-12 text-center">
           <p className="text-sm text-muted">Ask a question to run it through all {TECHNIQUES.length} techniques at once.</p>
-          <p className="mt-1 text-xs text-muted/70">top_k {topK} · chunk_top_k {chunkTopK} — set in the Explorer's mode card</p>
+          <p className="mt-1 text-xs text-muted/70">chunk_top_k {chunkTopK} — set in the Explorer's mode card</p>
         </section>
       ) : (
         <>
@@ -241,7 +239,7 @@ export default function Compare() {
             </table>
           </section>
           <p className="font-mono text-[11px] text-muted">
-            ran with top_k {topK} · chunk_top_k {chunkTopK} on {dataset?.name} · click a technique to open it in the Explorer
+            ran with chunk_top_k {chunkTopK} on {dataset?.name} · click a technique to open it in the Explorer
           </p>
         </>
       )}

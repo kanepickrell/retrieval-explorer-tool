@@ -24,6 +24,15 @@ _TASKS = (
     ("You work out what a user needs", "agent: goal + hypotheses"),
     ("You check whether retrieved evidence", "evidence check"),
     ("You revise hypotheses", "agent: revise"),
+    ("You are a precise assistant answering", "answer generation"),
+    ("You write search queries", "assist: query"),
+    ("You extract facts", "assist: facts"),
+    ("You judge whether documents", "assist: judge"),
+    ("You extract atomic", "metrics: claims"),
+    ("You verify", "metrics: verify"),
+    ("You judge context usefulness", "metrics: context precision"),
+    ("You extract named entities", "metrics: entities"),
+    ("You write questions", "metrics: answer relevancy"),
 )
 
 

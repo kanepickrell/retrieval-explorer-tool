@@ -7,17 +7,12 @@ import { TECHNIQUE_LABEL, TECHNIQUES, type Technique } from "@/lib/api";
 const HINTS: Record<Technique, string> = {
   vector: "Plain dense retrieval over chunk embeddings — no graph.",
   bm25: "Keyword search (Okapi BM25): exact terms, IDs and file names. No LLM, no embeddings.",
-  bm25_vector: "BM25 and vector rankings merged by reciprocal rank fusion — lexical + semantic.",
-  local: "Entity-centric: match entities, then pull their neighbourhood.",
-  global: "Relation-centric: rank the strongest relationships for the query.",
-  hybrid: "Local entities plus global relations, merged.",
-  mix: "Hybrid plus chunk vector search — the default mode.",
+  bm25_vector: "BM25 and vector rankings merged by reciprocal rank fusion — lexical + semantic. The default, and the best on the gold set.",
   agent: "Routing agent: states the goal, hypothesises where the answer lives, checks it on the metadata graph, then searches scoped. Watch it on the Agent page.",
 };
 
 type Props = {
   technique: Technique; onTechnique: (t: Technique) => void;
-  topK: number; onTopK: (v: number) => void;
   chunkTopK: number; onChunkTopK: (v: number) => void;
 };
 
@@ -56,10 +51,7 @@ export default function ModeCard(p: Props) {
           </button>
         ))}
       </div>
-      <div className="grid grid-cols-2 gap-4">
-        <Range label="top_k" value={p.topK} min={1} max={40} onChange={p.onTopK} />
-        <Range label="chunk_top_k" value={p.chunkTopK} min={1} max={20} onChange={p.onChunkTopK} />
-      </div>
+      <Range label="chunk_top_k" value={p.chunkTopK} min={1} max={20} onChange={p.onChunkTopK} />
       <p className="text-xs text-muted">{HINTS[p.technique]}</p>
     </section>
   );

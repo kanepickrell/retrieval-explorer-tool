@@ -1,6 +1,6 @@
 """
 Ragas-style evaluation metrics, computed for real with the same local judge
-(gemma3 via lightrag_provider.llm) and embeddings (nomic via .embed) the rest of
+(gemma3 via ollama_client.llm) and embeddings (nomic via .embed) the rest of
 the backend uses. These are faithful reimplementations of Ragas's algorithms,
 not the `ragas` pip package (which is brittle with small local models) -- the
 formulas match the Ragas docs and are easy to swap for the library later.
@@ -22,7 +22,7 @@ import os
 import re
 from typing import Dict, List, Optional
 
-from retrieval import lightrag_provider as lp
+from retrieval import ollama_client as ollama
 
 # ───────────────────────── gold set (reference-based) ─────────────────────────
 
@@ -108,7 +108,7 @@ async def faithfulness(answer: str, contexts: List[str]) -> Optional[float]:
     ctx = "\n\n".join(contexts).strip()
     if not ctx:
         return None
-    claims = _json_list(await lp.llm(
+    claims = _json_list(await ollama.llm(
         "Break the ANSWER into a list of standalone, verifiable factual claims. "
         "Return ONLY a JSON array of short strings.\n\nANSWER:\n" + answer,
         system_prompt="You extract atomic factual claims. Output JSON only."))
@@ -116,7 +116,7 @@ async def faithfulness(answer: str, contexts: List[str]) -> Optional[float]:
     if not claims:
         return None
     numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(claims))
-    verdicts = _json_list(await lp.llm(
+    verdicts = _json_list(await ollama.llm(
         "For each CLAIM, decide if it can be directly inferred from the CONTEXT. "
         "Return ONLY a JSON array of booleans, one per claim, in order.\n\n"
         f"CONTEXT:\n{ctx}\n\nCLAIMS:\n{numbered}",
@@ -134,14 +134,14 @@ async def answer_relevancy(query: str, answer: str, n: int = 3) -> Optional[floa
         return None
     if _NONCOMMITTAL.search(answer):
         return 0.0
-    qs = _json_list(await lp.llm(
+    qs = _json_list(await ollama.llm(
         f"Generate {n} distinct questions that the ANSWER below directly and fully "
         f"answers. Return ONLY a JSON array of {n} question strings.\n\nANSWER:\n" + answer,
         system_prompt="You write questions a given answer would answer. Output JSON only."))
     qs = [str(q) for q in qs if str(q).strip()][:n]
     if not qs:
         return None
-    vecs = await lp.embed([query] + qs, as_query=True)
+    vecs = await ollama.embed([query] + qs, as_query=True)
     qv, gen = vecs[0], vecs[1:]
     sims = [_cos(qv, g) for g in gen]
     if not sims:
@@ -156,7 +156,7 @@ async def context_precision(answer: str, contexts: List[str]) -> Optional[float]
     if not answer.strip() or not ctxs:
         return None
     numbered = "\n\n".join(f"[{i+1}] {c}" for i, c in enumerate(ctxs))
-    verdicts = _json_list(await lp.llm(
+    verdicts = _json_list(await ollama.llm(
         "Each CONTEXT chunk below is numbered. For each, decide if it was useful "
         "for arriving at the ANSWER. Return ONLY a JSON array of 0/1, one per chunk, in order.\n\n"
         f"ANSWER:\n{answer}\n\nCONTEXTS:\n{numbered}",
@@ -183,7 +183,7 @@ _CTX_CHARS = 2500
 
 
 async def _claims(text: str, limit: int = 15) -> List[str]:
-    out = _json_list(await lp.llm(
+    out = _json_list(await ollama.llm(
         "Break the TEXT into a list of standalone, verifiable factual statements. "
         "Return ONLY a JSON array of short strings.\n\nTEXT:\n" + text[:_REF_CHARS],
         system_prompt="You extract atomic factual statements. Output JSON only."))
@@ -192,7 +192,7 @@ async def _claims(text: str, limit: int = 15) -> List[str]:
 
 async def _supported(claims: List[str], source: str, source_name: str) -> List[bool]:
     numbered = "\n".join(f"{i+1}. {c}" for i, c in enumerate(claims))
-    v = _json_list(await lp.llm(
+    v = _json_list(await ollama.llm(
         f"For each STATEMENT, decide if it can be directly inferred from the {source_name}. "
         "Return ONLY a JSON array of booleans, one per statement, in order.\n\n"
         f"{source_name}:\n{source}\n\nSTATEMENTS:\n{numbered}",
@@ -229,8 +229,8 @@ async def context_entities_recall(reference: str, contexts: List[str]) -> Option
               "techniques, IDs, places) in the TEXT. Return ONLY a JSON array of strings.\n\nTEXT:\n")
     sysp = "You extract named entities. Output JSON only."
     import asyncio
-    ref_e, ctx_e = await asyncio.gather(lp.llm(prompt + reference[:_REF_CHARS], system_prompt=sysp),
-                                        lp.llm(prompt + ctx[:_REF_CHARS * 2], system_prompt=sysp))
+    ref_e, ctx_e = await asyncio.gather(ollama.llm(prompt + reference[:_REF_CHARS], system_prompt=sysp),
+                                        ollama.llm(prompt + ctx[:_REF_CHARS * 2], system_prompt=sysp))
     norm = lambda xs: {re.sub(r"\s+", " ", str(x)).strip().lower() for x in xs if str(x).strip()}
     ref, got = norm(_json_list(ref_e)), norm(_json_list(ctx_e))
     if not ref:

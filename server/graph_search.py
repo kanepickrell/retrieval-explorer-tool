@@ -1,19 +1,18 @@
 """
-Corpus-backed unified search router for ProtoGraph.
+Retrieval over a dataset's chunk index, as one endpoint for every technique:
 
-Retrieval is RAG over the document corpus, NOT SPARQL over the graph: the vector
-strategy reads the LightRAG chunk index (see retrieval/vector_provider.py) and
-needs only an Ollama embed host -- GraphDB does not have to be up. SPARQL/graph
-strategies (keyword, neural) are PARKED for now and return a clear note.
+  vector       dense retrieval over the chunk embeddings (retrieval/vector_provider.py)
+  bm25         keyword retrieval (retrieval/bm25_provider.py)
+  bm25_vector  BM25 + vector, Reciprocal Rank Fusion (the default for Ping and the agent)
+  agent        the routing agent (agent_loop.py): goal -> hypotheses -> metadata graph -> scoped search
 
-Mounted by main.py at /api/search/unified. Default strategy is `vector` (the main
-retrieval now); force others with ?force_strategy=.
+  GET /api/search/unified?q=&limit=&force_strategy=&dataset=   -> a stored run (run_id)
+  GET /api/search/answer?run_id=    the answer generated over exactly that run's context
+  GET /api/search/metrics?run_id=   Ragas-style metrics + recall@k for that run
 
-Strategies:
-  vector  -> naive dense retrieval over corpus chunks (green-lit for focused queries). ACTIVE.
-  lightrag-> LightRAG over the corpus (breadth). NOT YET PORTED (next slice).
-  keyword -> SPARQL regex over the graph. PARKED (needs GraphDB).
-  neural  -> graph-routing subsystem. PARKED (needs GraphDB + assembly).
+LightRAG's graph modes (local / global / hybrid / mix) were removed on 2026-11-13: on the
+72 real+generated gold questions they scored hit@5 0.75-0.83 against 0.972 for
+bm25_vector, and each cold query needed an LLM call. LightRAG still builds the index.
 """
 from __future__ import annotations
 import time
@@ -21,24 +20,12 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
-from unified_search import analyze_query_intent  # backend-agnostic intent signals
 from retrieval import vector_provider
 import datasets as DS
 import runs as RUNS
 
-# kept for main.py back-compat; retrieval no longer depends on it
-_gdb = None
-PARKED = {"keyword", "neural"}           # need GraphDB/SPARQL -- parked for now
-NOT_PORTED: set = set()                  # (lightrag now ported)
-LIGHTRAG_ALIASES = {"lightrag", "mix", "local", "global", "hybrid"}
 LEXICAL = {"bm25", "bm25_vector"}         # keyword retrieval, and keyword + vector fusion
-
-
-def init_graph_search(gdb=None):
-    """main.py calls this at startup. gdb is optional and currently unused --
-    retrieval is corpus-backed, so search runs even with GraphDB down."""
-    global _gdb
-    _gdb = gdb
+STRATEGIES = ("vector", "bm25", "bm25_vector", "agent")
 
 
 def run_vector(query: str, limit: int, storage_dir: str = None) -> List[Dict]:
@@ -53,14 +40,12 @@ async def unified_search(
     q: str = Query(..., min_length=1, description="Search query"),
     limit: int = Query(20, le=100),
     force_strategy: Optional[str] = Query(
-        None, description="vector | bm25 | bm25_vector | local | global | hybrid | mix | agent"),
+        None, description="vector | bm25 | bm25_vector | agent"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
-    top_k: Optional[int] = Query(None, le=200, description="LightRAG entity/relation top_k"),
-    fresh_keywords: bool = Query(False, description="bypass the keyword cache (cold LLM extraction)"),
 ):
     """Retrieve under one strategy and store the result as a run. Returns run_id:
     /answer and /metrics take it, so they work on exactly this retrieval."""
-    return await run_unified(q, limit, force_strategy, dataset, top_k, fresh_keywords)
+    return await run_unified(q, limit, force_strategy, dataset)
 
 
 _META_GRAPHS: dict = {}   # graphml path -> (mtime, nx graph)
@@ -92,8 +77,7 @@ def _metadata_subgraph(storage, doc_ids: List[str]) -> Optional[dict]:
 
 
 async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = None,
-                      dataset: Optional[str] = None, top_k: Optional[int] = None,
-                      fresh_keywords: bool = False, exclude_docs: Optional[set] = None) -> dict:
+                      dataset: Optional[str] = None, exclude_docs: Optional[set] = None) -> dict:
     """The retrieval behind /unified, callable directly (e.g. by /api/assist).
     exclude_docs: doc ids to drop from the results (a replayed chat must not
     retrieve itself); excluded docs are removed before the run is stored, so
@@ -101,12 +85,10 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
     t0 = time.time()
     ds = DS.get(dataset)
     sd = str(ds.storage)
-    intent = analyze_query_intent(q)
     strategy = (force_strategy or "vector").lower()
 
-    note, results, graph, lr_ms, steps = None, [], None, None, []
-    contexts, context_text, system_prompt = [], "", None
-    keywords_cached = None  # None = not applicable (vector has no keyword step)
+    note, results, graph, agent_ms, steps = None, [], None, None, []
+    contexts, context_text = [], ""
     if strategy == "vector" or strategy in LEXICAL:
         if strategy == "vector":
             results = run_vector(q, limit, sd)
@@ -146,76 +128,30 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
         contexts = [r.pop("content", "") for r in results]
         context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
         note = out.get("error") or out.get("waiting") or (None if results else "the agent found nothing")
-        lr_ms = round(arun.events[-1]["ms"], 1) if arun.events else None
-    elif strategy in LIGHTRAG_ALIASES:
-        # lazy import so a missing LightRAG install never breaks the vector path
-        try:
-            from retrieval import lightrag_provider
-            lr_mode = "mix" if strategy == "lightrag" else strategy
-            results = await lightrag_provider.search(q, limit, mode=lr_mode, storage_dir=sd, top_k=top_k,
-                                                     fresh_keywords=fresh_keywords)
-            keywords_cached = lightrag_provider.LAST_KEYWORDS_CACHED
-            graph = lightrag_provider.LAST_GRAPH  # subgraph for the retrieval graph UI
-            lr_ms = lightrag_provider.LAST_QUERY_MS
-            steps = lightrag_provider.LAST_STEPS
-            contexts = lightrag_provider.LAST_CONTEXT_CHUNKS
-            system_prompt = lightrag_provider.LAST_PROMPT
-            if exclude_docs:
-                # drop the excluded docs' chunks from the rows; LightRAG's rendered prompt
-                # can't be edited safely, so answers for such runs use naive RAG over the
-                # remaining chunks instead (system_prompt=None)
-                keep = [i for i, r in enumerate(results) if r["id"] not in exclude_docs]
-                if len(keep) != len(results):
-                    results = [results[i] for i in keep]
-                    for i, r in enumerate(results, 1):
-                        r["rank"] = i
-                    excluded_ids = {c for c in exclude_docs}
-                    contexts = [c for c, ch in zip(contexts, lightrag_provider._CUR["chunks"])
-                                if lightrag_provider._title_of(ch) not in excluded_ids]
-                    system_prompt = None
-            context_text = system_prompt or ""
-            if not results:
-                note = lightrag_provider.LAST_ERROR or "lightrag returned no context for this query"
-        except Exception as e:
-            note = f"lightrag unavailable: {e!r}"[:160]
-    elif strategy in PARKED:
-        note = f"'{strategy}' is parked (needs GraphDB/SPARQL, on hold)"
+        agent_ms = round(arun.events[-1]["ms"], 1) if arun.events else None
     else:
-        note = f"unknown strategy '{strategy}', use vector"
+        note = f"unknown strategy '{strategy}': use one of {', '.join(STRATEGIES)}"
 
-    # retrieval time only. LightRAG: timed inside its query lock (excludes queue wait).
-    # vector/bm25/fusion: the sum of their measured steps, which excludes the extra
-    # query embedding used only for the cross-technique display score (cosine).
-    if lr_ms is not None:
-        retrieval_ms = lr_ms
+    # retrieval time only. vector/bm25/fusion: the sum of their measured steps, which
+    # excludes the extra query embedding used only for the cross-technique display score.
+    if agent_ms is not None:
+        retrieval_ms = agent_ms
     elif steps:
         retrieval_ms = round(sum(st.get("ms") or 0 for st in steps), 1)
     else:
         retrieval_ms = round((time.time() - t0) * 1000, 1)
-    run = RUNS.new_run(dataset=ds.id, query=q, strategy=strategy, limit=limit, top_k=top_k,
+    run = RUNS.new_run(dataset=ds.id, query=q, strategy=strategy, limit=limit,
                        retrieved_ids=[r["id"] for r in results], contexts=contexts,
-                       context_text=context_text, system_prompt=system_prompt,
-                       retrieval_ms=retrieval_ms, keywords_cached=keywords_cached)
+                       context_text=context_text, retrieval_ms=retrieval_ms)
     return {
         "run_id": run.id,
         "query": q,
         "dataset": ds.id,
-        "strategy_used": strategy if (results or strategy in ("vector", "agent") or strategy in LEXICAL) else "none",
-        "intent_analysis": {
-            "recommended_strategy": intent.strategy.value,
-            "confidence": intent.confidence,
-            "signals": intent.signals,
-            "search_terms": intent.search_terms,
-        },
+        "strategy_used": strategy if strategy in STRATEGIES else "none",
         "total_results": len(results),
         "time_ms": retrieval_ms,
-        # true = keyword extraction was skipped (cached); compare latencies like with like
-        "keywords_cached": keywords_cached,
-        # time spent getting keywords (LLM call when cold, ~0 when cached); time_ms
-        # minus this is the retrieval itself, which is what differs between modes
-        "keyword_ms": next((s.get("ms") for s in steps if s.get("label", "").startswith(("Extract keywords", "Keywords"))), None),
         "note": note,
-        "graph": graph,  # {nodes, edges}: lightrag strategies and metadata-graph datasets, else null
+        "graph": graph,  # {nodes, edges}: the agent and metadata-graph datasets, else null
         "steps": steps,  # measured pipeline stages: [{label, detail, stat, ms}]
         "results": results,
     }
@@ -234,17 +170,14 @@ async def _ensure_answer(run) -> None:
     """Generate the run's answer once, over the run's stored context, and cache it."""
     if run.answer is not None:
         return
-    from retrieval import lightrag_provider
+    from retrieval import ollama_client as ollama
     t0 = time.time()
     try:
         if not run.retrieved_ids:
             run.answer, run.answer_note = "", "nothing was retrieved, so there is nothing to ground an answer in"
-        elif run.system_prompt:
-            # LightRAG modes: the exact prompt LightRAG built for this context
-            run.answer = await lightrag_provider.generate_from_prompt(run.query, run.system_prompt)
         else:
-            # vector: naive RAG over the retrieved chunks
-            run.answer = await lightrag_provider.generate_over(run.query, run.context_text)
+            # RAG over the retrieved chunks, the same prompt and model for every technique
+            run.answer = await ollama.generate_over(run.query, run.context_text)
         if not run.answer and not run.answer_note:
             run.answer_note = "LLM returned an empty answer -- check the LLM host"
     except Exception as e:
@@ -323,29 +256,10 @@ async def evaluate(run_id: str = Query(..., description="run_id from /unified"))
     }
 
 
-@router.get("/unified/analyze")
-async def analyze(q: str = Query(..., min_length=1)):
-    intent = analyze_query_intent(q)
-    return {
-        "query": q,
-        "recommended_strategy": intent.strategy.value,
-        "confidence": intent.confidence,
-        "signals": intent.signals,
-        "active_strategies": ["vector"] + sorted(LIGHTRAG_ALIASES),
-        "parked": sorted(PARKED),
-    }
-
-
 @router.get("/unified/status")
 async def corpus_status():
-    """Corpus / embed-host status for both retrievers."""
-    out = {"vector": vector_provider.status()}
-    try:
-        from retrieval import lightrag_provider
-        out["lightrag"] = lightrag_provider.status()
-    except Exception as e:
-        out["lightrag"] = {"error": f"import failed: {e!r}"[:120]}
-    return out
+    """Vector index / embed-host status."""
+    return {"vector": vector_provider.status()}
 
 
 @router.post("/unified/reindex")

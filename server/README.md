@@ -8,7 +8,7 @@ synthetic Agent Hub corpus and any pseudonymized Agent Hub / Open WebUI export i
 |---|---|
 | `GET /datasets`, `GET /documents[/chunks\|/source]` | the datasets and their docs, chunks and source files |
 | `GET /graph`, `GET /api/graph/stats` | a dataset's knowledge graph `{nodes, edges}` (LightRAG or metadata graphml) |
-| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense), `local`/`global`/`hybrid`/`mix` (LightRAG), `bm25`/`bm25_vector`, or `agent` (routing agent), with the touched subgraph + ranked chunks |
+| `GET /api/search/unified?q=&limit=&force_strategy=` | retrieval: `vector` (dense), `bm25`, `bm25_vector` (fusion, the default), or `agent` (routing agent), with ranked chunks (+ the touched subgraph for the agent and metadata datasets) |
 | `GET /api/search/answer`, `GET /api/search/metrics` | the generated answer for a run, and its Ragas-style metrics + recall@k |
 | `POST /api/assist`, `GET /api/assist/chats` | one chime-in decision for a conversation; replayable export chats |
 | `GET /api/live` | feed of chime-in calls (the Live page) |
@@ -20,7 +20,7 @@ synthetic Agent Hub corpus and any pseudonymized Agent Hub / Open WebUI export i
 
 Self-contained — the retrieval providers live in this folder, nothing is
 imported from another repo. Needs the deps in `requirements.txt` plus a
-reachable Ollama host for embeddings (and generation for the LightRAG modes).
+reachable Ollama host for embeddings and generation.
 
 ```bash
 python -m venv .venv
@@ -32,9 +32,9 @@ Config (env):
 
 | var | default | meaning |
 |---|---|---|
-| `PROTOGRAPH_CORPUS_STORAGE` | `C:\repos\lightrag-explainer\agenthub_storage` | LightRAG storage (graphml + chunk vdb) |
+| `PROTOGRAPH_CORPUS_STORAGE` | `C:\repos\lightrag-explainer\agenthub_storage` | storage of the synthetic corpus (graphml + chunk vdb) |
 | `PROTOGRAPH_EMBED_HOST` | `http://10.128.241.200:11434` | Ollama embed/chat host |
-| `PROTOGRAPH_LLM` | `gemma3:12b` | generation model: LightRAG, Ping's profile and follow-ups, the chat model |
+| `PROTOGRAPH_LLM` | `gemma3:12b` | generation model: answers, Ping's profile and follow-ups, the chat model, index builds |
 | `PROTOGRAPH_JUDGE_LLM` | `gpt-oss:20b` | the evidence check (agent and Ping) |
 | `PORT` | `8000` | listen port |
 
@@ -47,10 +47,10 @@ Point the frontend at it with `VITE_API_URL` (see `../.env`).
 | `app.py` | FastAPI app: datasets, documents, `/graph`; mounts the routers below |
 | `datasets.py` | dataset registry: each export's storage dirs, docs and gold sets |
 | `graph_search.py` | `/api/search/unified` (retrieval) + `/api/search/answer` (generation) |
-| `unified_search.py` | query-intent analysis (`analyze_query_intent`) |
 | `retrieval/vector_provider.py` | naive dense retrieval over the chunk vdb |
 | `retrieval/bm25_provider.py` | BM25 over chunks, and BM25+vector Reciprocal Rank Fusion (`search_fused`) |
-| `retrieval/lightrag_provider.py` | LightRAG local/global/hybrid/mix + answer generation; the shared `llm` call |
+| `retrieval/ollama_client.py` | the one Ollama client: chat (`llm`, answer generation) and embeddings, on a shared session |
+| `retrieval/llm_stats.py` | records every LLM / query-embedding call for `/api/llm/stats` |
 | `runs.py` / `metrics.py` | retrieval runs kept for the Answer tab; Ragas-style metrics with the local judge |
 | `assist.py` / `live.py` | chime-in decisions for a conversation, and their live feed |
 | `agent_loop.py` | routing agent: goal → hypotheses → validate on the metadata graph → route (records / document / detail) → scoped dive → check, with H0 (the user's own words) as the fallback |

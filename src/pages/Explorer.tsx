@@ -14,7 +14,7 @@ const EMPTY = { nodes: [] as GraphNode[], edges: [] as GraphEdge[] };
 export default function Explorer() {
   const {
     datasetId, dataset, reportError, highlight, setHighlight,
-    query, run, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
+    query, run, technique, setTechnique, chunkTopK, setChunkTopK,
     result, resultKey, loading,
   } = useExplorer();
 
@@ -122,7 +122,7 @@ export default function Explorer() {
             <section className="card h-[460px] p-3"><ChatPanel /></section>
           )}
         </div>
-        <ModeCard technique={technique} onTechnique={setTechnique} topK={topK} onTopK={setTopK} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
+        <ModeCard technique={technique} onTechnique={setTechnique} chunkTopK={chunkTopK} onChunkTopK={setChunkTopK} />
       </div>
       <div className="grid grid-cols-1 gap-4 lg:h-[700px] lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
         <div className="h-[560px] lg:h-full">

@@ -26,7 +26,7 @@ const STRATEGIES: { id: QueryStrategy; label: string; title: string }[] = [
  * would help. Clicking a chime-in opens its retrieval in the graph / inspector panels.
  */
 export default function ChatPanel() {
-  const { datasetId, technique, topK, chunkTopK, showResult, reportError } = useExplorer();
+  const { datasetId, technique, chunkTopK, showResult, reportError } = useExplorer();
   const [chats, setChats] = useState<ReplayChat[]>([]);
   const [chatId, setChatId] = useState<string>("");          // "" = type your own
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -71,7 +71,7 @@ export default function ChatPanel() {
     try {
       const res = await assist({
         datasetId, turns: transcript(withMsg), technique, queryStrategy: strategy,
-        limit: chunkTopK, topK, llmFilter, minScore,
+        limit: chunkTopK, llmFilter, minScore,
         excludeDocs: chat ? [chat.doc] : [], alreadySuggested: suggestedRef.current,
       });
       suggestedRef.current = [...suggestedRef.current, ...res.suggestions.map((s) => s.doc)];

@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 
 export const SHORTCUTS: [string, string][] = [
   ["/", "Focus the question"],
-  ["1 – 7", "Switch mode (vector · bm25 · bm25+vector · local · global · hybrid · mix)"],
+  ["1 – 4", "Switch mode (vector · bm25 · bm25+vector · agent)"],
   ["f", "Fit graph to view"],
   ["l", "Toggle all labels"],
   ["c", "Collapse graph regions"],

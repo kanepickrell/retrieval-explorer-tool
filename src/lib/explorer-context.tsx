@@ -23,8 +23,6 @@ type Ctx = {
   runNonce: number;
   technique: Technique;
   setTechnique: (t: Technique) => void;
-  topK: number;
-  setTopK: (v: number) => void;
   chunkTopK: number;
   setChunkTopK: (v: number) => void;
   result: RetrievalResult | null;
@@ -46,8 +44,7 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
 
   const [query, setQuery] = useState("");
   const [runNonce, setRunNonce] = useState(0);
-  const [technique, setTechnique] = useState<Technique>("mix");
-  const [topK, setTopK] = useState(10);
+  const [technique, setTechnique] = useState<Technique>("bm25_vector");
   const [chunkTopK, setChunkTopK] = useState(5);
   const [result, setResult] = useState<RetrievalResult | null>(null);
   const [resultKey, setResultKey] = useState(0);
@@ -74,7 +71,7 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
     const id = ++reqId.current;
     const t = window.setTimeout(() => {
       setLoading(true);
-      runRetrieval(datasetId, query, technique, topK, chunkTopK)
+      runRetrieval(datasetId, query, technique, chunkTopK)
         .then((r) => {
           if (id !== reqId.current) return; // superseded by a newer request
           setResult(r);
@@ -89,7 +86,7 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
         .finally(() => { if (id === reqId.current) setLoading(false); });
     }, 200);
     return () => window.clearTimeout(t);
-  }, [datasetId, query, runNonce, technique, topK, chunkTopK]);
+  }, [datasetId, query, runNonce, technique, chunkTopK]);
 
   const showResult = useCallback((r: RetrievalResult) => {
     reqId.current++;            // supersede any in-flight one-off retrieval
@@ -107,9 +104,9 @@ export function ExplorerProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Ctx>(() => ({
     datasets, datasetId, setDatasetId, refreshDatasets, error, reportError: setError, highlight, setHighlight,
     dataset: datasets.find((d) => d.id === datasetId),
-    query, run, runNonce, technique, setTechnique, topK, setTopK, chunkTopK, setChunkTopK,
+    query, run, runNonce, technique, setTechnique, chunkTopK, setChunkTopK,
     result, showResult, resultKey, loading,
-  }), [datasets, datasetId, refreshDatasets, error, highlight, query, run, runNonce, technique, topK, chunkTopK, result, resultKey, loading]);
+  }), [datasets, datasetId, refreshDatasets, error, highlight, query, run, runNonce, technique, chunkTopK, result, resultKey, loading]);
 
   return <ExplorerCtx.Provider value={value}>{children}</ExplorerCtx.Provider>;
 }

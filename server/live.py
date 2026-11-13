@@ -51,7 +51,6 @@ def record(req, resp: dict, user_agent: Optional[str] = None, error: Optional[st
         "technique": req.technique,
         "query_strategy": req.query_strategy,
         "limit": req.limit,
-        "top_k": req.top_k,
         "llm_filter": req.llm_filter,
         "min_score": req.min_score,
         "turns": [{"role": t.role, "content": t.content[-TURN_CHARS:]} for t in req.turns[-TURNS_KEPT:]],

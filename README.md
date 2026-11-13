@@ -1,7 +1,7 @@
 # Retrieval Explorer
 
 A dark, card-based lab for running a query through different RAG retrieval
-techniques (`vector · local · global · hybrid · mix`) and watching what each one
+techniques (`vector · bm25 · bm25+vector · agent`) and watching what each one
 retrieves over a knowledge graph: the touched subgraph, the chunks, the step
 trace, the streamed answer and Ragas-style metrics.
 
