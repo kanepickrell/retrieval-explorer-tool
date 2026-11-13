@@ -27,6 +27,10 @@ Every step is an event on the run, so the Agent page can show the loop live:
   POST /api/agent/run          start a run ({dataset, turns | query}); wait=true blocks
   GET  /api/agent/runs         recent runs, newest first (any source: UI, search, bench)
   GET  /api/agent/runs/{id}    one run's events (?after=<i> for new ones) and result
+  GET  /api/agent/runs/{id}/graph  the run as a traversal graph, with per-step roles
+
+A run whose question is in a gold set carries the expected docs and whether its
+top 5 reached them, so real traffic and replays can be monitored at a glance.
 
 graph_search exposes it as the "agent" technique, so the Explorer, Compare and
 the benchmark run it like any other retrieval.
@@ -160,7 +164,8 @@ class AgentRun:
         route = next((e["data"].get("route") for e in reversed(self.events) if e["kind"] == "route"), None)
         return {"id": self.id, "at": self.at, "source": self.source, "dataset": self.dataset,
                 "status": self.status, "query": self.query[:300], "goal": goal, "route": route,
-                "events": len(self.events), "ms": self.events[-1]["ms"] if self.events else 0}
+                "events": len(self.events), "ms": self.events[-1]["ms"] if self.events else 0,
+                "gold": _gold_info(self)}
 
 
 # ───────────────────────── LLM steps ─────────────────────────
@@ -180,7 +185,7 @@ _HYP_FORMAT = (
     '{"claim": "<where the answer lives, at most 15 words>", '
     '"answer_type": "records" | "document" | "detail", '
     '"target": "chat" | "file" | "agent" | "step" | "tool" | "user" | "any", '
-    '"scope": {"users": [], "teams": [], "agents": [], "files": [], "terms": []}, '
+    '"scope": {"users": [], "teams": [], "agents": [], "files": [], "chats": [], "terms": []}, '
     '"query": "<search query, at most 15 words>"}'
 )
 
@@ -207,7 +212,7 @@ Rules:
 - target: the kind of record the answer consists of ("user" when the answer is people).
 - Chats cover whatever users asked about (study help, writing, trivia, code, security work), not only Agent Hub. Don't assume the answer involves agents or files unless the user says so.
 - query: reuse the user's own distinctive words; don't replace them with generic ones.
-- scope: ONLY names the user actually wrote in the conversation, spelled as in KNOWN RECORDS where they match. Never add an agent, file or user the user did not mention. terms are distinctive words the right records must contain (product, tool or file names, IDs, error text) -- not generic words.
+- scope: chats are chat titles the user quoted. ONLY names the user actually wrote in the conversation, spelled as in KNOWN RECORDS where they match. Never add an agent, file or user the user did not mention. terms are distinctive words the right records must contain (product, tool or file names, IDs, error text) -- not generic words.
 - Give 1 or 2 hypotheses that differ in where they look, most likely first. Keep every field short."""
 
 _REVISE_PROMPT = """You are routing a question for a team's knowledge base.
@@ -245,7 +250,7 @@ def _clean_hyps(raw) -> List[dict]:
             continue
         sc = h.get("scope") if isinstance(h.get("scope"), dict) else {}
         scope = {k: [str(x).strip() for x in (sc.get(k) or []) if str(x).strip()][:6]
-                 for k in ("users", "teams", "agents", "files", "terms")}
+                 for k in ("users", "teams", "agents", "files", "chats", "terms")}
         out.append({"claim": str(h.get("claim") or "").strip()[:300],
                     "answer_type": h.get("answer_type") if h.get("answer_type") in ANSWER_TYPES else "document",
                     "target": h.get("target") if h.get("target") in TARGETS else "any",
@@ -259,13 +264,29 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
 
 
+def scope_terms(scope: dict) -> List[str]:
+    return list(scope.get("_terms") or [])
+
+
 def _resolve(L: dict, scope: dict) -> tuple:
     """Map scope names onto graph nodes / docs. -> (resolved, unresolved names)."""
     G = L["G"]
     T = lambda n: G.nodes[n].get("entity_type")
     short = lambda n: n.split(": ", 1)[-1].rsplit(" [", 1)[0]
-    res = {"users": [], "teams": [], "agents": [], "files": [], "terms": []}
+    res = {"users": [], "teams": [], "agents": [], "files": [], "chats": [], "topics": [], "terms": []}
     missing = []
+    scope = {**scope, "files": list(scope["files"]), "agents": list(scope["agents"]), "terms": []}
+    named = {_norm(short(n)): n for n in G if T(n) in ("File", "Agent", "Step", "Tool", "Topic")}
+    for term in scope_terms(scope):
+        n = named.get(_norm(term))
+        if n and T(n) == "File":
+            scope["files"].append(term)
+        elif n and T(n) == "Topic":
+            res["topics"].append(n)
+        elif n:
+            scope["agents"].append(term)
+        else:
+            scope["terms"].append(term)
     for u in scope["users"]:
         m = re.search(r"user[\s_-]*0*(\d+)", u.lower())
         nid = f"user-{int(m.group(1)):02d}" if m else None
@@ -287,6 +308,10 @@ def _resolve(L: dict, scope: dict) -> tuple:
     for f in scope["files"]:
         hit = [n for n in G if T(n) == "File" and (_norm(f) in _norm(short(n)) or _norm(short(n)) in _norm(f))][:6]
         (res["files"].extend(hit) if hit else missing.append(f))
+    for c in scope.get("chats") or []:
+        hit = [n for n in G if T(n) == "Chat" and len(_norm(c)) >= 4
+               and (_norm(c) in _norm(short(n)) or _norm(short(n)) in _norm(c))][:6]
+        (res["chats"].extend(hit) if hit else missing.append(c))
     for term in scope["terms"]:
         t = term.lower()
         docs = sorted(d for d, txt in L["texts"].items() if t in txt)
@@ -314,6 +339,25 @@ def _grounded(name: str, convo: str) -> bool:
     return bool(words) and sum(w in c.split() for w in words) / len(words) >= 0.5
 
 
+_TARGET_WORDS = (
+    ("user", re.compile(r"^\s*(who|whose)\b|\bwhich (users|people|person)\b", re.I)),
+    ("chat", re.compile(r"\b(chats?|conversations?|discussions?)\b", re.I)),
+    ("file", re.compile(r"\b(files?|uploads?|uploaded|attachments?|attached)\b", re.I)),
+    ("agent", re.compile(r"\bwhich agents\b|\bwhat agents\b", re.I)),
+)
+
+
+def _question_target(q: str) -> Optional[str]:
+    """What kind of record the question asks for, from its wording: "who" -> users,
+    otherwise the first record noun ("what FILES were attached in the chat" -> files).
+    None for counts and when the wording doesn't say. Overrides the model's guess."""
+    q = q or ""
+    if re.match(r"\s*how many\b", q, re.I):
+        return None   # a count: the answer is a number, whatever record holds it
+    hits = [(m.start(), target) for target, rx in _TARGET_WORDS for m in [rx.search(q)] if m]
+    return min(hits)[1] if hits else None
+
+
 def _scope_docs(L: dict, res: dict, target: str, use_terms: bool) -> Optional[set]:
     docs = _scope_docs_raw(L, res, target, use_terms)
     return None if docs is None else {L["alias"].get(d, d) for d in docs}
@@ -333,6 +377,10 @@ def _scope_docs_raw(L: dict, res: dict, target: str, use_terms: bool) -> Optiona
         groups.append(set().union(*(_near(L, a) for a in res["agents"])))
     if res["files"]:
         groups.append(set().union(*(_near(L, f) for f in res["files"])))
+    if res["chats"]:
+        groups.append(set().union(*(_near(L, c) for c in res["chats"])))
+    if res["topics"]:
+        groups.append(set().union(*(_near(L, t) for t in res["topics"])))
     if not groups and use_terms and res["terms"]:
         groups.append(set().union(*(set(d) for _, d in res["terms"])))
     if not groups:
@@ -404,26 +452,35 @@ def _best_chunk(rows: List[dict]) -> Dict[str, dict]:
 def _validate(L: dict, h: dict, convo: str, user_q: str, exclude: set) -> dict:
     """Check a hypothesis against the graph (and, for content, the chunk index)."""
     sc = h["scope"]
-    dropped = [x for k in ("users", "teams", "agents", "files", "terms") for x in sc[k] if not _grounded(x, convo)]
+    dropped = [x for k in ("users", "teams", "agents", "files", "chats", "terms") for x in sc[k] if not _grounded(x, convo)]
     sc = {k: [x for x in v if _grounded(x, convo)] for k, v in sc.items()}
     h = {**h, "scope": sc}
-    res, missing = _resolve(L, sc)
-    named = sum(len(sc[k]) for k in ("users", "teams", "agents", "files"))
-    found = sum(1 for k in ("users", "teams", "agents", "files") for x in sc[k] if x not in missing)
+    res, missing = _resolve(L, {**sc, "_terms": sc["terms"], "terms": []})
+    retarget = None
+    if h["answer_type"] == "records":
+        want = _question_target(user_q)
+        if want and want != h["target"]:
+            retarget = f"target {h['target']} → {want} (the question asks for {want}s)"
+            h = {**h, "target": want}
+    named = sum(len(sc[k]) for k in ("users", "teams", "agents", "files", "chats")) + len(res["topics"])
+    found = named - sum(1 for k in ("users", "teams", "agents", "files", "chats") for x in sc[k] if x in missing)
     records = h["answer_type"] == "records"
     scope = _scope_docs(L, res, h["target"], use_terms=records)
     if scope is not None:
         scope -= exclude
     query = h["query"] or h["claim"]
     cards = _cards(L, query, exclude)
-    note = f"dropped {', '.join(dropped)} (not in the conversation); " if dropped else ""
+    note = (f"dropped {', '.join(dropped)} (not in the conversation); " if dropped else "") + \
+           (f"{retarget}; " if retarget else "")
     out = {"dropped": dropped, "missing": missing,
            "resolved": {k: ([t for t, _ in v] if k == "terms" else v) for k, v in res.items() if v},
+           "retarget": retarget,
            "term_docs": {t: len(d) for t, d in res["terms"]},
            "scope": sorted(scope) if scope is not None else None,
            "cards": [{"doc": c["id"], "title": _title(L, c["id"]), "score": c.get("relevance_score"),
                       "in_scope": bool(scope and c["id"] in scope)} for c in cards[:5]],
-           "_cards": cards, "_h": h}
+           "_cards": cards, "_h": h,
+           "named_scope": any(res[k] for k in ("users", "teams", "agents", "files", "chats", "topics"))}
     if named and not found:
         return {**out, "verdict": "rejected", "score": 0.0,
                 "why": note + f"none of the named records exist ({', '.join(missing)})"}
@@ -464,7 +521,14 @@ def _execute(run: AgentRun, L: dict, h: dict, v: dict, user_q: str, exclude: set
     """-> ranked result docs [{doc, score, text, chunk_id, via}] for the hypothesis."""
     scope = set(v["scope"]) if v["scope"] is not None else None
     query = h["query"] or h["claim"]
-    if h["answer_type"] == "records" and scope:
+    seeds = {G_doc for k in ("users", "teams", "agents", "files", "chats")
+             for n in (v.get("resolved") or {}).get(k, []) for G_doc in [L["G"].nodes[n].get("file_path")] if G_doc}
+    hard = h["answer_type"] == "records" and scope and v.get("named_scope") and not scope <= seeds
+    if h["answer_type"] == "records" and scope and not hard:
+        run.emit("fallback", "Soft scope: searching content, scope first",
+                 "the scope comes only from terms" if not v.get("named_scope")
+                 else "the scope is just the named record itself", layer="chunks")
+    if hard:
         order = {c["id"]: i for i, c in enumerate(v["_cards"])}
         ranked = sorted(scope, key=lambda d: (order.get(d, 10 ** 6), d))[:SCOPE_CAP]
         run.emit("search", f"Graph traversal: {len(scope)} record(s)",
@@ -473,14 +537,14 @@ def _execute(run: AgentRun, L: dict, h: dict, v: dict, user_q: str, exclude: set
         score = {c["id"]: c.get("relevance_score") for c in v["_cards"]}
         return [{"doc": d, "score": score.get(d), "text": L["cards"].get(d, ""),
                  "chunk_id": f"{d[:-3]}-card", "via": "graph"} for d in ranked]
-    if h["answer_type"] == "records":
+    if h["answer_type"] == "records" and not scope:
         pre = PREFIX.get(h["target"])
         cards = [c for c in v["_cards"] if not pre or c["id"].startswith(pre)] or v["_cards"]
         run.emit("search", f"Record cards: {len(cards)} {h['target']} record(s)", f"cards for “{query}” (no scope)",
                  layer="cards", scoped=False, hits=len(cards))
         return [{"doc": c["id"], "score": c.get("relevance_score"), "text": L["cards"].get(c["id"], ""),
                  "chunk_id": c.get("chunk_id"), "via": "card"} for c in cards[:20]]
-    # document / detail: chunk search, the scope's docs first, then the rest of the index
+    # document / detail (and soft records): chunk search, the scope's docs first, then the rest
     rows = _content(L, [query, user_q], exclude)
     if scope:
         inside = [r for r in rows if r["id"] in scope]
@@ -607,7 +671,7 @@ async def run_agent(run: AgentRun, require_clear: bool = True, exclude: Optional
             run.emit("revise", "Revised the hypotheses", str(r.get("note") or "")[:300], count=len(hyps))
 
         h0 = {"claim": "the user's own words, without a rewrite", "answer_type": "detail", "target": "any",
-              "scope": {k: [] for k in ("users", "teams", "agents", "files", "terms")}, "query": user_q,
+              "scope": {k: [] for k in ("users", "teams", "agents", "files", "chats", "terms")}, "query": user_q,
               "baseline": True}
         pool = [hv for hv in pool if hv[1]["verdict"] != "rejected"][:2]
         if not pool:
@@ -623,7 +687,7 @@ async def run_agent(run: AgentRun, require_clear: bool = True, exclude: Optional
                      + (f" · scope {len(v['scope'])} doc(s)" if v["scope"] is not None else " · no scope"),
                      route=h["answer_type"], target=h["target"], claim=h["claim"], attempt=attempt)
             docs = await asyncio.to_thread(_execute, run, L, h, v, user_q, exclude)
-            if h["answer_type"] == "records" and v["scope"]:
+            if docs and docs[0]["via"] == "graph":
                 chk = {"verdict": "answers", "best": 0, "why": "exact: the records came from the graph"}
                 run.emit("check", f"{len(docs)} record(s) from the graph", chk["why"], verdict="answers")
             else:
@@ -643,8 +707,8 @@ async def run_agent(run: AgentRun, require_clear: bool = True, exclude: Optional
 
         h, docs = outcome["h"], outcome["docs"]
         answer = None
-        if h["answer_type"] == "records" and outcome["v"]["scope"]:
-            answer = f"{len(outcome['v']['scope'])} record(s): " + "; ".join(_title(L, d["doc"]) for d in docs)
+        if docs and docs[0]["via"] == "graph":
+            answer = f"{len(docs)} record(s): " + "; ".join(_title(L, d["doc"]) for d in docs)
         result = {"goal": goal, "route": h["answer_type"], "hypothesis": h, "check": outcome["check"],
                   "answer": answer,
                   "docs": [{"doc": d["doc"], "title": _title(L, d["doc"]), "score": d["score"], "via": d["via"],
@@ -670,6 +734,183 @@ def subgraph(dataset: str, result: dict) -> Optional[dict]:
         return None
     from graph_search import _metadata_subgraph
     return _metadata_subgraph(L["graph_ds"].storage, [d["doc"] for d in result.get("docs", [])[:10]])
+
+
+# ───────────────────────── monitoring: gold matching + traversal graph ─────────────────────────
+
+_GOLD: Dict[str, tuple] = {}     # export id -> (loaded at, {normalised query: gold entry})
+GOLD_TTL_S = 60.0
+SCOPE_SHOW = 30                  # scope records drawn per hypothesis
+
+
+def _gold_entry(dataset_id: str, query: str) -> Optional[dict]:
+    """The gold entry whose question is exactly this run's question (any gold set)."""
+    base = DS.get(dataset_id).id.split("~")[0]
+    hit = _GOLD.get(base)
+    if not hit or time.time() - hit[0] > GOLD_TTL_S:
+        entries = DS.gold_entries(DS.get(base))
+        hit = _GOLD[base] = (time.time(), {_norm(g["query"]): g for g in entries if g.get("gold_ids")})
+    return hit[1].get(_norm(query))
+
+
+def _gold_info(run: "AgentRun") -> Optional[dict]:
+    """For a run whose question is in a gold set: the expected docs, and (once it has
+    finished) whether the top 5 results reached any of them -- the monitoring signal."""
+    try:
+        g = _gold_entry(run.dataset, run.query)
+    except Exception:
+        return None
+    if not g:
+        return None
+    got = [d["doc"] for d in (run.result or {}).get("docs", [])][:5]
+    done = run.status != "running"
+    reached = [x for x in g["gold_ids"] if x in got]
+    return {"id": g.get("id"), "type": g.get("query_type") or "real", "gold_ids": g["gold_ids"],
+            "hit5": (bool(reached) if done else None), "reached": reached}
+
+
+_HYP_ROLES = ("pending", "validated", "weak", "rejected", "chosen", "failed")
+# strength of a record's role; within a step and across steps the stronger one wins
+_ROLE_RANK = {"scope": 1, "hit_out": 2, "term": 3, "missing": 3, "dropped": 3, "hit_in": 4, "seed": 5,
+              "evidence": 6, "confirmed": 7, "result": 8}
+
+
+def _put(roles: dict, n: Optional[str], role: str) -> None:
+    if n and _ROLE_RANK.get(role, 0) >= _ROLE_RANK.get(roles.get(n), 0):
+        roles[n] = role
+
+
+def traversal(run: "AgentRun") -> dict:
+    """The run as a graph: the question, a node per hypothesis, the records each one
+    named (or named wrongly), the scope it marked out, which hits fell inside it,
+    what was read and checked, and the result -- with each step's role changes, so
+    the page can replay the traversal step by step. Real records keep their graph
+    edges; the agent's reasoning is drawn as virtual nodes and edges on top."""
+    L = _layers(run.dataset)
+    G = L["G"]
+    nodes: Dict[str, dict] = {}
+    edges: Dict[tuple, dict] = {}
+    short = lambda n: n.split(": ", 1)[-1].rsplit(" [", 1)[0]
+
+    def real(nid: Optional[str]) -> Optional[str]:
+        if not nid or nid not in G:
+            return None
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "label": short(nid)[:48], "type": G.nodes[nid].get("entity_type", "?"),
+                          "doc": G.nodes[nid].get("file_path") or None, "virtual": False}
+        return nid
+
+    def doc_node(doc: str) -> Optional[str]:
+        doc = L["alias"].get(doc, doc)
+        ns = L["doc_nodes"].get(doc) or []
+        return real(ns[0]) if ns else None
+
+    def virt(nid: str, label: str, typ: str, **extra) -> str:
+        if nid not in nodes:
+            nodes[nid] = {"id": nid, "label": label[:60], "type": typ, "doc": None, "virtual": True, **extra}
+        return nid
+
+    def edge(a: Optional[str], b: Optional[str], kind: str, label: str = ""):
+        if a and b and a != b:
+            edges.setdefault((a, b, kind), {"source": a, "target": b, "kind": kind, "label": label})
+
+    steps, claim_h, current = [], {}, None
+    for e in run.events:
+        k, d, roles = e["kind"], e.get("data") or {}, {}
+        if k == "context":
+            roles[virt("Q", run.query[:60] or "question", "Question")] = "query"
+        elif k == "goal":
+            virt("Q", "question", "Question")
+            nodes["Q"]["label"] = (d.get("goal") or run.query)[:60]
+            roles["Q"] = "goal"
+        elif k == "hypothesis":
+            hid = f"H{d.get('n')}"
+            h = d.get("hypothesis") or {}
+            claim_h[h.get("claim")] = hid
+            virt(hid, hid, "Hypothesis", claim=h.get("claim"), answer_type=h.get("answer_type"), target=h.get("target"))
+            edge("Q", hid, "hypothesis")
+            roles[hid] = "pending"
+        elif k == "validate":
+            hid = f"H{d.get('n')}"
+            roles[hid] = d.get("verdict", "weak")
+            res = d.get("resolved") or {}
+            seeds = [real(x) for key in ("users", "teams", "agents", "files", "chats", "topics") for x in res.get(key, [])]
+            for s in filter(None, seeds):
+                _put(roles, s, "seed")
+                edge(hid, s, "names")
+            for name in d.get("missing") or []:
+                roles[virt(f"x:{name}", name, "Missing")] = "missing"
+                edge(hid, f"x:{name}", "names")
+            for name in d.get("dropped") or []:
+                roles[virt(f"x:{name}", name, "Dropped")] = "dropped"
+                edge(hid, f"x:{name}", "names")
+            terms = res.get("terms") or []
+            for t in terms:
+                roles[virt(f"t:{t}", t, "Term")] = "term"
+                edge(hid, f"t:{t}", "names")
+            for doc in (d.get("scope") or [])[:SCOPE_SHOW]:
+                n = doc_node(doc)
+                if not n:
+                    continue
+                roles.setdefault(n, "scope")
+                linked = False
+                for s in filter(None, seeds):
+                    if G.has_edge(s, n):
+                        edge(s, n, "graph", (G.edges[s, n].get("keywords") or "").split(",")[0])
+                        linked = True
+                for t in terms:
+                    if t.lower() in L["texts"].get(L["alias"].get(doc, doc), ""):
+                        edge(f"t:{t}", n, "contains")
+                        linked = True
+                if not linked:
+                    edge(hid, n, "scope")
+            for c in d.get("passages") or d.get("cards") or []:
+                n = doc_node(c["doc"])
+                if n:
+                    _put(roles, n, "hit_in" if c.get("in_scope") else "hit_out")
+                    edge(hid, n, "found")
+        elif k == "route":
+            if "H0" in e["title"]:
+                current = virt("H0", "H0", "Hypothesis", claim="the user's own words, without a rewrite",
+                               answer_type="detail", target="any")
+                edge("Q", "H0", "hypothesis")
+            else:
+                current = claim_h.get(d.get("claim"), current)
+            if current:
+                roles[current] = "chosen"
+        elif k == "evidence":
+            for x in d.get("evidence") or []:
+                n = doc_node(x["doc"])
+                if n:
+                    _put(roles, n, "evidence")
+                    edge(current, n, "read")
+        elif k == "check":
+            if d.get("best"):
+                n = doc_node(d["best"])
+                if n:
+                    _put(roles, n, "confirmed")
+            if d.get("verdict") == "no" and current:
+                roles[current] = "failed"
+        elif k == "retry" and current:
+            roles[current] = "failed"
+        elif k == "result":
+            for x in (d.get("docs") or [])[:5]:
+                n = doc_node(x["doc"])
+                if n:
+                    _put(roles, n, "result")
+                    edge(current, n, "answer")
+        steps.append({"i": e["i"], "kind": k, "roles": roles})
+
+    gold = _gold_info(run)
+    if gold:
+        gold["nodes"] = [n for n in (doc_node(x) for x in gold["gold_ids"]) if n]
+    # graph context: real edges among the drawn records (e.g. user -> chat -> file)
+    reals = [n for n, v in nodes.items() if not v["virtual"]]
+    for a, b, dd in G.subgraph(reals).edges(data=True):
+        if not any((a, b, kk) in edges or (b, a, kk) in edges for kk in ("graph",)):
+            edge(a, b, "graph", (dd.get("keywords") or "").split(",")[0])
+    return {"id": run.id, "status": run.status, "nodes": list(nodes.values()), "edges": list(edges.values()),
+            "steps": steps, "gold": gold}
 
 
 # ───────────────────────── API ─────────────────────────
@@ -720,6 +961,15 @@ async def start(req: AgentRequest):
 @router.get("/runs")
 def runs(limit: int = Query(30, ge=1, le=MAX_RUNS)):
     return [r.summary() for r in reversed(list(_RUNS.values()))][:limit]
+
+
+@router.get("/runs/{run_id}/graph")
+def run_graph(run_id: str):
+    """The run's traversal graph (see traversal()), recomputed from its events so far."""
+    run = _RUNS.get(run_id)
+    if not run:
+        raise HTTPException(404, "no such agent run (runs are kept in memory and lost on restart)")
+    return traversal(run)
 
 
 @router.get("/runs/{run_id}")

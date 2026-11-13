@@ -6,10 +6,11 @@ import {
   RotateCcw, Search, ShieldCheck, SkipForward, Target, TriangleAlert, XCircle,
 } from "lucide-react";
 import {
-  getAgentRun, listAgentRuns, listReplayChats, startAgent,
-  type AgentEvent, type AgentRunDetail, type AgentRunSummary, type ChatTurn, type ReplayChat,
+  getAgentGraph, getAgentRun, listAgentRuns, listReplayChats, startAgent,
+  type AgentEvent, type AgentRunDetail, type AgentRunSummary, type AgentTraversal, type ChatTurn, type ReplayChat,
 } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
+import TraversalGraph from "@/components/TraversalGraph";
 
 const RUNS_POLL_MS = 1500;
 const RUN_POLL_MS = 500;
@@ -185,12 +186,28 @@ function StatusIcon({ s }: { s: AgentRunSummary["status"] }) {
 }
 
 function RunList({ runs, selected, onSelect }: { runs: AgentRunSummary[]; selected: string | null; onSelect: (id: string) => void }) {
+  const [onlyMissed, setOnlyMissed] = useState(false);
+  const scored = runs.filter((r) => r.gold && r.gold.hit5 != null);
+  const reached = scored.filter((r) => r.gold!.hit5).length;
+  const shown = onlyMissed ? runs.filter((r) => r.gold && r.gold.hit5 === false) : runs;
   return (
     <section className="card space-y-2 p-3">
-      <h3 className="caption px-1">Recent runs · {runs.length}</h3>
+      <div className="flex items-baseline gap-2 px-1">
+        <h3 className="caption">Recent runs · {runs.length}</h3>
+        {scored.length > 0 && (
+          <span className="ml-auto font-mono text-[10px] text-muted" title="Runs whose question is in a gold set: did the top 5 reach the expected doc?">
+            gold reached <span className="text-ink">{reached}/{scored.length}</span>
+          </span>
+        )}
+      </div>
+      {scored.length > reached && (
+        <label className="flex items-center gap-1.5 px-1 font-mono text-[10px] text-muted">
+          <input type="checkbox" checked={onlyMissed} onChange={(e) => setOnlyMissed(e.target.checked)} /> only gold misses
+        </label>
+      )}
       {!runs.length && <div className="px-1 text-xs text-muted">None yet (kept in memory; a backend restart clears them).</div>}
       <ul className="max-h-[420px] space-y-1 overflow-auto">
-        {runs.map((r) => (
+        {shown.map((r) => (
           <li key={r.id}>
             <button onClick={() => onSelect(r.id)}
               className={clsx("w-full rounded-md px-2 py-1.5 text-left transition-colors",
@@ -203,6 +220,11 @@ function RunList({ runs, selected, onSelect }: { runs: AgentRunSummary[]; select
                 <span>{new Date(r.at * 1000).toLocaleTimeString()}</span>
                 <span>{SOURCE_LABEL[r.source] ?? r.source}</span>
                 {r.route && <span className="text-ink/70">{r.route}</span>}
+                {r.gold && r.gold.hit5 != null && (
+                  <span className={r.gold.hit5 ? "text-good" : "text-bad"} title={`gold question (${r.gold.type}): top 5 ${r.gold.hit5 ? "reached" : "missed"} the expected doc`}>
+                    gold {r.gold.hit5 ? "✓" : "✗"}
+                  </span>
+                )}
                 <span className="ml-auto">{(r.ms / 1000).toFixed(1)} s</span>
               </div>
             </button>
@@ -217,16 +239,18 @@ function RunList({ runs, selected, onSelect }: { runs: AgentRunSummary[]; select
 
 function RunView({ id }: { id: string }) {
   const [run, setRun] = useState<AgentRunDetail | null>(null);
+  const [graph, setGraph] = useState<AgentTraversal | null>(null);
+  const [step, setStep] = useState<number | null>(null);   // null = follow the latest step
   const [err, setErr] = useState<string | null>(null);
   const after = useRef(0);
 
   useEffect(() => {
     let stop = false, t: number | undefined;
     after.current = 0;
-    setRun(null); setErr(null);
+    setRun(null); setGraph(null); setStep(null); setErr(null);
     const tick = async () => {
       try {
-        const d = await getAgentRun(id, after.current);
+        const [d, g] = await Promise.all([getAgentRun(id, after.current), getAgentGraph(id)]);
         if (stop) return;   // a stale loop (dev mode mounts effects twice) must not append
         if (d.events.length) after.current = d.events[d.events.length - 1].i;
         setRun((cur) => {
@@ -234,6 +258,7 @@ function RunView({ id }: { id: string }) {
           const seen = new Set(cur.events.map((e) => e.i));
           return { ...d, events: [...cur.events, ...d.events.filter((e) => !seen.has(e.i))] };
         });
+        setGraph(g);
         if (d.status !== "running") return;   // finished: stop polling
       } catch (e: any) {
         setErr(String(e?.message ?? e));
@@ -265,8 +290,12 @@ function RunView({ id }: { id: string }) {
           <span className="whitespace-pre-wrap">{lastUser.content}</span>
         </div>
       )}
+      {graph && graph.nodes.length > 0 && <TraversalGraph t={graph} step={step} onStep={setStep} dataset={run.dataset} />}
       <ol className="relative space-y-2 border-l border-line pl-4">
-        {run.events.map((e) => <EventRow key={e.i} e={e} dataset={run.dataset} />)}
+        {run.events.map((e) => (
+          <EventRow key={e.i} e={e} dataset={run.dataset} current={step === e.i}
+            future={step != null && e.i > step} onPick={() => setStep(step === e.i ? null : e.i)} />
+        ))}
         {run.status === "running" && (
           <li className="flex items-center gap-2 text-xs text-muted">
             <Loader2 size={13} className="animate-spin" /> {nextStep(run.events)}
@@ -323,7 +352,9 @@ function Chips({ label, items, struck }: { label: string; items: string[]; struc
   );
 }
 
-function EventRow({ e, dataset }: { e: AgentEvent; dataset: string }) {
+function EventRow({ e, dataset, current, future, onPick }: {
+  e: AgentEvent; dataset: string; current: boolean; future: boolean; onPick: () => void;
+}) {
   const Icon = KIND_ICON[e.kind] ?? CircleDashed;
   const d = e.data ?? {};
   const head = (
@@ -345,9 +376,12 @@ function EventRow({ e, dataset }: { e: AgentEvent; dataset: string }) {
     </div>
   );
   return (
-    <li className={clsx("relative", e.kind === "validate" && "ml-5")}>
-      <span className="absolute -left-[21px] top-1.5 h-2 w-2 rounded-full bg-line" />
-      {head}
+    <li className={clsx("relative rounded-md transition-opacity", e.kind === "validate" && "ml-5",
+      current && "bg-surface-2 shadow-[inset_0_0_0_1px_var(--line)]", future && "opacity-35")}>
+      <span className={clsx("absolute -left-[21px] top-1.5 h-2 w-2 rounded-full", current ? "bg-local" : "bg-line")} />
+      <button onClick={onPick} className="block w-full text-left" title="Show the graph at this step (click again to follow the latest)">
+        {head}
+      </button>
       {e.kind === "goal" && d.clear === false && d.missing && (
         <div className="ml-6 mt-1 text-xs text-warn">still unclear: {d.missing}</div>
       )}

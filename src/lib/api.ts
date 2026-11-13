@@ -375,7 +375,15 @@ export type AgentStatus = "running" | "done" | "waiting" | "error";
 export type AgentRunSummary = {
   id: string; at: number; source: string; dataset: string; status: AgentStatus;
   query: string; goal: string | null; route: string | null; steps: number; ms: number;
+  /** set when the run's question is in a gold set: the expected docs and, once finished,
+   *  whether the top 5 reached any of them */
+  gold: AgentGold | null;
 };
+export type AgentGold = { id: string; type: string; goldIds: string[]; hit5: boolean | null; reached: string[]; nodes?: string[] };
+const mapGold = (g: any): AgentGold | null => (g ? {
+  id: String(g.id ?? ""), type: String(g.type ?? ""), goldIds: g.gold_ids ?? [], hit5: g.hit5 ?? null,
+  reached: g.reached ?? [], nodes: g.nodes ?? undefined,
+} : null);
 export type AgentDoc = { doc: string; title: string; score: number | null; via: string; chunkId: string | null; text: string };
 export type AgentRunDetail = AgentRunSummary & {
   turns: ChatTurn[]; error: string | null; events: AgentEvent[];
@@ -385,7 +393,7 @@ export type AgentRunDetail = AgentRunSummary & {
 const mapRunSummary = (r: any): AgentRunSummary => ({
   id: String(r.id), at: Number(r.at), source: String(r.source ?? "other"), dataset: String(r.dataset ?? ""),
   status: r.status, query: String(r.query ?? ""), goal: r.goal ?? null, route: r.route ?? null,
-  steps: Number(r.events ?? 0), ms: Number(r.ms ?? 0),
+  steps: Number(r.events ?? 0), ms: Number(r.ms ?? 0), gold: mapGold(r.gold),
 });
 
 export async function startAgent(opts: {
@@ -432,4 +440,24 @@ export async function getAgentRun(id: string, after = 0): Promise<AgentRunDetail
       })),
     } : null,
   };
+}
+
+/** A run as a traversal graph: real records (with their graph edges) plus the agent's
+ *  reasoning as virtual nodes (question, hypotheses, terms, missing/dropped names), and
+ *  each step's role changes so the page can replay it. See agent_loop.traversal(). */
+export type TraversalNode = {
+  id: string; label: string; type: string; doc: string | null; virtual: boolean;
+  claim?: string; answer_type?: string; target?: string;
+};
+export type TraversalEdge = { source: string; target: string; kind: string; label: string };
+export type TraversalStep = { i: number; kind: string; roles: Record<string, string> };
+export type AgentTraversal = {
+  id: string; status: AgentStatus; nodes: TraversalNode[]; edges: TraversalEdge[];
+  steps: TraversalStep[]; gold: AgentGold | null;
+};
+
+export async function getAgentGraph(id: string): Promise<AgentTraversal> {
+  const d = await getJson(`/api/agent/runs/${encodeURIComponent(id)}/graph`);
+  return { id: String(d.id), status: d.status, nodes: d.nodes ?? [], edges: d.edges ?? [], steps: d.steps ?? [],
+           gold: mapGold(d.gold) };
 }
