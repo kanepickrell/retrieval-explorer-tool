@@ -48,5 +48,15 @@ export const CLUSTER_COLOR: Record<string, string> = {
   technique: "#a58ff1",
   method: "#5cc27a",
   model: "#e8736b",
+  // metadata graph (ingest/build_metadata_graph.py): one cluster per record type
+  user: "#35c0be",
+  team: "#e0a73a",
+  chat: "#6fa8dc",
+  file: "#c39bd3",
+  agent: "#5cc27a",
+  skill: "#8fd19e",
+  step: "#9fc5e8",
+  topic: "#d5a6bd",
+  catalog: "#cfb07a",
 };
 export const clusterColor = (c: string) => CLUSTER_COLOR[c] ?? "#93a0b0";

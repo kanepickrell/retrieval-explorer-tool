@@ -51,6 +51,8 @@ from live import router as live_router  # noqa: E402
 app.include_router(live_router)  # /api/live (feed of chime-in calls for the Live page)
 from agent_loop import router as agent_router  # noqa: E402
 app.include_router(agent_router)  # /api/agent (routing agent: runs + live events)
+from ping_cycle import router as ping_router  # noqa: E402
+app.include_router(ping_router)  # /api/ping (Ping cycle: profile, probes, gate, per-turn stages)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 
@@ -74,7 +76,7 @@ def _load_corpus_graph(dataset: str | None = None) -> dict:
         etype = (d.get("entity_type") or "UNKNOWN").strip().strip('"') or "UNKNOWN"
         nodes.append({
             "id": str(n),
-            "label": str(n).strip('"'),
+            "label": (lambda s: s if len(s) <= 60 else s[:59] + "…")(str(n).strip('"')),
             "cluster": etype.lower(),
             "size": 40 + min(deg.get(n, 0), 25) * 4,  # degree -> radius variety
             "type": etype,

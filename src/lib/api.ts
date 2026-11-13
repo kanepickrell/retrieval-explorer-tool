@@ -461,3 +461,67 @@ export async function getAgentGraph(id: string): Promise<AgentTraversal> {
   return { id: String(d.id), status: d.status, nodes: d.nodes ?? [], edges: d.edges ?? [], steps: d.steps ?? [],
            gold: mapGold(d.gold) };
 }
+
+// ───────────────────────── Ping cycle (server/ping_cycle.py) ─────────────────────────
+
+export const PING_STAGES = ["observe", "update", "check", "probe", "gate", "dive", "suggest", "learn"] as const;
+export type PingStageName = (typeof PING_STAGES)[number];
+export type PingStage = { status: "pending" | "done" | "skip"; title?: string; detail?: string; data?: any; ms?: number };
+export type PingHypothesis = {
+  id: string; kind: "artifact" | "insight" | "idea"; claim: string; answer_type: string; target: string;
+  scope: Record<string, string[]>; query: string; confidence: number; status: "active" | "retired"; born: number;
+  confirmed: boolean; l1: { verdict: string; why: string; scope: number | null } | null;
+  history: { turn: number; delta: number; source: string; why: string; conf: number }[];
+};
+export type PingProbe = { id: string; text: string; tests: string | null; turn: number; used: boolean | null; sim: number | null };
+export type PingFocus = {
+  top?: string | null;
+  hyps?: Record<string, { conf: number; seeds: string[]; scope: string[]; hits: string[]; verdict: string; status: string }>;
+  evidence?: string[]; suggestion?: string[];
+};
+export type PingSuggestion = { kind: string; doc: string; title: string; why: string; hypothesis: string; verdict: string };
+export type PingCycle = {
+  turn: number; user: string; reply: string | null; stages: Record<PingStageName, PingStage>;
+  focus: PingFocus; snapshot?: { id: string; kind: string; claim: string; conf: number; status: string; l1: string | null }[];
+  suggestion?: PingSuggestion | null; error?: string;
+  /** replay ground truth, filled in when the next real user message arrives */
+  eval: { next_user?: string; top_supported?: boolean; top_effect?: string; probe_used?: string | null };
+};
+export type PingSessionSummary = {
+  id: string; at: number; source: string; dataset: string; status: "idle" | "running" | "done" | "error";
+  title: string; author: string | null; turn: number; turns_total: number | null;
+  probes_offered: number; probes_used: number; top_supported: number; top_scored: number; suggestions: number;
+};
+export type PingSession = PingSessionSummary & {
+  error: string | null; chat: { chat_id: string; doc: string; title: string; author: string | null } | null;
+  turns: ChatTurn[]; cycles: PingCycle[];
+  profile: { goal: string; stage: string; facts: { who: string; what: string; why: string };
+             hypotheses: PingHypothesis[]; probes: PingProbe[]; suggested: string[] };
+};
+export type PingChat = { chat_id: string; doc: string; title: string; author: string | null; user_turns: number };
+
+async function sendJson(method: string, path: string, body?: any): Promise<any> {
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}${path}`, {
+      method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(`backend unreachable at ${API_BASE}`);
+  }
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json())?.detail ?? ""; } catch { /* non-JSON error body */ }
+    throw new ApiError(`${path} → ${r.status}${detail ? `: ${detail}` : ""}`);
+  }
+  return r.json();
+}
+
+export const listPingChats = (datasetId: string): Promise<PingChat[]> => getJson("/api/ping/chats", { dataset: datasetId });
+export const listPingSessions = (): Promise<PingSessionSummary[]> => getJson("/api/ping/sessions");
+export const getPingSession = (id: string): Promise<PingSession> => getJson(`/api/ping/sessions/${encodeURIComponent(id)}`);
+export const newPingSession = (datasetId: string, chatId?: string): Promise<PingSession> =>
+  sendJson("POST", "/api/ping/sessions", { dataset: datasetId, chat_id: chatId ?? null });
+export const pingNext = (id: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/next`);
+export const pingSay = (id: string, message: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/say`, { message });
+export const resetPing = () => sendJson("DELETE", "/api/ping/sessions");
