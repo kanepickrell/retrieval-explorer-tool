@@ -42,6 +42,7 @@ and the real next message as ground truth for the probes and hypotheses.
 from __future__ import annotations
 
 import asyncio
+import re
 import itertools
 import json
 import time
@@ -182,17 +183,47 @@ Rules:
 - new: only for needs the listed hypotheses don't cover, at most 2. Chats cover any subject, not only Agent Hub; don't assume agents or files unless the user says so.
 - scope: ONLY names the user actually wrote. facts: only what the user stated; "" otherwise."""
 
-_PROBE_PROMPT = """A user is chatting with an AI assistant. After each reply, 3 follow-up questions are offered that the user can click to send.
+_PROBE_PROMPT = """You write the follow-up suggestions a chat app shows under the assistant's reply. The USER clicks one and it is sent to the assistant as the user's next message.
 
-GOAL so far: {goal}
-LATEST REPLY (what the user just read):
+So every follow-up must be:
+- in the user's voice: a question or request the user asks the ASSISTANT for help with ("How do I...", "Can you show me...", "Could this be...", "Is there a...")
+- something this user would plausibly want next, given what they first asked and the reply they just read
+- NEVER a question to the user about their own situation. The user already knows their situation; they are the one asking for help.
+  (Examples from an unrelated chat, about a slow nightly database backup; they show the form, not the content.)
+  Bad (the assistant interviewing the user): "What kind of database is it?" / "Which version are you running?" / "Have you checked the logs?"
+  Good (the user asking the assistant): "Could the new index explain why the backup got slower?" / "Is there a checklist for tuning backup jobs?" / "Has anyone else hit slow backups after a migration?"
+- only about things the user or the reply actually mentioned; don't add specifics (numbers, names, times) they didn't say
+
+A teammate assistant ("Ping") also learns from which follow-up the user picks. Below are its hypotheses about what would ultimately help this user. Make at least 2 follow-ups each lean toward a DIFFERENT open hypothesis, so the pick tells Ping which one is right, while staying natural and useful on their own. Hypothesis kinds turn into natural user questions like this:
+- artifact: asking whether a document, runbook, script or past chat covers this ("Is there a runbook for...?")
+- insight: asking whether others hit this and how they handled it ("Has anyone else seen this, and how did they fix it?")
+- idea: asking whether this can be automated, or whether there's an agent or tool for it ("Can these checks be automated?")
+
+THE USER'S FIRST MESSAGE IN THIS CHAT:
+{first}
+WHAT THE USER SAID MOST RECENTLY:
+{last}
+THE ASSISTANT'S REPLY THEY JUST READ:
 {reply}
-
-Open hypotheses about what the user ultimately needs (id, confidence, claim):
+GOAL so far: {goal}
+OPEN HYPOTHESES (id, kind, confidence: claim):
 {hyps}
 
-Write the 3 follow-ups. Each must be a natural next question for the user given the reply, written as the user would ask it, and useful on its own. Where you can, make one help tell the open hypotheses apart, and say which hypothesis it tests.
-Reply with JSON only: {{"probes": [{{"text": "...", "tests": "<hypothesis id or null>"}}, ...]}}"""
+Write 5 candidates, best first. Reply with JSON only:
+{{"probes": [{{"text": "<the follow-up, in the user's voice>", "tests": "<hypothesis id it leans toward, or null>"}}, ...]}}"""
+
+# A follow-up is the user's next message to the assistant; these are the assistant
+# questioning the user instead, so they are dropped whatever the model wrote.
+_ASKS_THE_USER = re.compile(
+    # "do/did/have/are you ..." asks about the user; "can/could you ..." is the user asking the assistant, so it stays
+    r"\b(do|did|does|have|has|are|were) you\b"
+    r"|\byour (setup|environment|team|system|config|configuration|version|network|rehearsal|exercise|range|goal|use case)\b"
+    r"|\b(what|which) (kind|type|sort) of [^?]{1,40}? (is|was) (it|this|that)\b"
+    r"|\b(tell me more|could you clarify|can you clarify|what do you mean|which one are you)\b", re.I)
+
+
+def _user_voice(text: str) -> bool:
+    return bool(text) and not _ASKS_THE_USER.search(text)
 
 
 def _hyp_lines(s: Session) -> str:
@@ -346,20 +377,28 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     if reply is None and not open_h:
         _stage(cycle, "probe", "skip", "No reply and nothing to test", "", t0)
     else:
-        pr = await A._llm_json(_PROBE_PROMPT.format(goal=P["goal"] or "(unknown)",
-                                                    reply=_clip(reply or f"(no reply yet; the user said) {user_msg}", 2500),
-                                                    hyps=_hyp_lines(s)),
-                               "You write follow-up questions for a chat. Output JSON only.")
-        new_probes = []
+        first = next((t["content"] for t in s.turns if t["role"] == "user"), user_msg)
+        pr = await A._llm_json(_PROBE_PROMPT.format(goal=P["goal"] or "(unknown)", first=_clip(first, 800),
+                                                    last=_clip(user_msg, 800),
+                                                    reply=_clip(reply or "(no reply yet)", 2500), hyps=_hyp_lines(s)),
+                               "You write the follow-up suggestions a user can click to send to an AI assistant. Output JSON only.")
+        new_probes, dropped = [], []
         ids = {h["id"] for h in open_h}
-        for x in (pr.get("probes") or [])[:3]:
-            if isinstance(x, dict) and str(x.get("text") or "").strip():
-                p = {"id": f"p{next(s._pid)}", "text": str(x["text"]).strip()[:240],
+        for x in (pr.get("probes") or []):
+            text = str(x.get("text") or "").strip()[:240] if isinstance(x, dict) else ""
+            if not text:
+                continue
+            if not _user_voice(text):
+                dropped.append(text)      # the assistant questioning the user, not the user asking
+                continue
+            if len(new_probes) < 3:
+                p = {"id": f"p{next(s._pid)}", "text": text,
                      "tests": x.get("tests") if x.get("tests") in ids else None, "turn": turn, "used": None, "sim": None}
                 P["probes"].append(p)
                 new_probes.append(p)
-        _stage(cycle, "probe", "done", f"{len(new_probes)} follow-ups offered, {sum(1 for p in new_probes if p['tests'])} test a hypothesis",
-               "shown after the reply; next turn checks whether the user took one", t0, probes=new_probes)
+        _stage(cycle, "probe", "done", f"{len(new_probes)} follow-ups offered, {sum(1 for p in new_probes if p['tests'])} lean toward a hypothesis",
+               "in the user's voice, shown after the reply; next turn checks whether the user took one"
+               + (f"; dropped {len(dropped)} that questioned the user" if dropped else ""), t0, probes=new_probes, dropped=dropped)
         if next_msg is not None:
             cycle["eval"]["next_user"] = _clip(next_msg, 300)
 
