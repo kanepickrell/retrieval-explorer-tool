@@ -21,10 +21,10 @@ const STAGE: Record<PingStageName, { n: number; label: string; icon: any; what: 
   observe: { n: 1, label: "Observe", icon: Eye, what: "the new message; did it take a follow-up offered last turn?" },
   update: { n: 2, label: "Update profile", icon: UserRoundPen, what: "goal, who/what/why, and each hypothesis supported or contradicted (1.a / 1.b)" },
   check: { n: 3, label: "Check on L1", icon: ShieldCheck, what: "every live hypothesis against the metadata graph, no LLM" },
-  probe: { n: 4, label: "Probe", icon: MessageSquareQuote, what: "the 3 follow-ups shown after the reply, some testing a hypothesis" },
-  gate: { n: 5, label: "Gate", icon: Filter, what: "enough to suggest? confident, held up, confirmed, about work, not a repeat" },
-  dive: { n: 6, label: "Dive L2", icon: FileSearch, what: "scoped retrieval for the top hypothesis + the evidence check" },
-  suggest: { n: 7, label: "Suggest", icon: Sparkles, what: "one record, framed as artifact / insight / idea, or stay quiet" },
+  gate: { n: 4, label: "Gate", icon: Filter, what: "enough to suggest? confident, held up, confirmed, about work, not a repeat" },
+  dive: { n: 5, label: "Dive L2", icon: FileSearch, what: "scoped retrieval for the top hypothesis + the evidence check" },
+  suggest: { n: 6, label: "Suggest", icon: Sparkles, what: "one record, framed as artifact / insight / idea, or stay quiet; the reply then uses it" },
+  probe: { n: 7, label: "Probe", icon: MessageSquareQuote, what: "the 3 follow-ups shown after the reply, in the user's voice, some testing a hypothesis" },
   learn: { n: 8, label: "Learn", icon: GraduationCap, what: "confidence after this turn and what moved" },
 };
 const KIND_STYLE: Record<string, string> = { artifact: "text-local border-local/50", insight: "text-global border-global/50", idea: "text-vector border-vector/50" };
@@ -315,9 +315,17 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
                 <span className="line-clamp-4 whitespace-pre-wrap">{c.user}</span>
               </button>
               {c.reply && <Reply text={c.reply} label={live ? `assistant · ${s.chat_model}` : "assistant (real reply)"} full={live} />}
+              {live && !c.reply && running && c.turn === s.cycles.length && (
+                <div className="flex items-center gap-2 px-1 text-xs text-muted">
+                  <Loader2 size={12} className="animate-spin" />
+                  {c.stages.suggest?.status === "pending" ? "Ping is checking first…" : "assistant is typing (with Ping's find)…"}
+                </div>
+              )}
               {c.suggestion && (
-                <div className="rounded border border-good/40 bg-good/10 px-2 py-1.5 text-xs">
-                  <span className="font-mono text-[10px] text-good">Ping chimes in · {c.suggestion.kind}</span>
+                <div className={clsx("rounded border px-2 py-1.5 text-xs", c.suggestion.strength === "might help" ? "border-warn/40 bg-warn/10" : "border-good/40 bg-good/10")}>
+                  <span className={clsx("font-mono text-[10px]", c.suggestion.strength === "might help" ? "text-warn" : "text-good")}>
+                    Ping chimes in · {c.suggestion.kind}{c.suggestion.strength === "might help" ? " · might help" : ""}{c.suggestion.who ? ` · from ${c.suggestion.who}` : ""}
+                  </span>
                   <div className="text-ink">{c.suggestion.title}</div>
                   <div className="text-muted">{c.suggestion.why}</div>
                 </div>
@@ -354,8 +362,7 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
               : <div className="flex items-center gap-2 px-1 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> assistant is typing…</div>}
           </li>
         )}
-        {running && !s.pending?.user && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> Ping is running its cycle…</li>}
-        {running && s.pending?.reply && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> Ping is running its cycle…</li>}
+        {running && !!s.chat && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> Ping is running its cycle…</li>}
       </ol>
     </section>
   );
@@ -626,7 +633,8 @@ function StageCard({ k, cycle, s, base }: { k: PingStageName; cycle: PingCycle; 
         <div className="rounded border border-good/40 bg-good/10 px-2 py-1.5 text-xs">
           <span className={clsx("mr-1.5 rounded border px-1 font-mono text-[10px]", KIND_STYLE[d.suggestion.kind])}>{d.suggestion.kind}</span>
           {doc(d.suggestion.doc, d.suggestion.title)}
-          <div className="text-muted">from {d.suggestion.hypothesis} · check: {d.suggestion.verdict}</div>
+          <div className="text-muted">{d.suggestion.who ? `from ${d.suggestion.who} · ` : ""}hypothesis {d.suggestion.hypothesis} · check: {d.suggestion.verdict}</div>
+          {d.suggestion.excerpt && <div className="mt-1 line-clamp-4 text-muted">passed to the reply: “{d.suggestion.excerpt}”</div>}
         </div>
       )}
       {k === "learn" && (d.moves ?? []).length > 0 && (

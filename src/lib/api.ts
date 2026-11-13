@@ -467,7 +467,8 @@ export async function getAgentGraph(id: string): Promise<AgentTraversal> {
 
 // ───────────────────────── Ping cycle (server/ping_cycle.py) ─────────────────────────
 
-export const PING_STAGES = ["observe", "update", "check", "probe", "gate", "dive", "suggest", "learn"] as const;
+/** in execution order: Ping decides (1-6), the chat model replies with its find, then the follow-ups (7) */
+export const PING_STAGES = ["observe", "update", "check", "gate", "dive", "suggest", "probe", "learn"] as const;
 export type PingStageName = (typeof PING_STAGES)[number];
 export type PingStage = { status: "pending" | "done" | "skip"; title?: string; detail?: string; data?: any; ms?: number };
 export type PingHypothesis = {
@@ -482,7 +483,7 @@ export type PingFocus = {
   hyps?: Record<string, { conf: number; seeds: string[]; scope: string[]; hits: string[]; verdict: string; status: string }>;
   evidence?: string[]; suggestion?: string[];
 };
-export type PingSuggestion = { kind: string; doc: string; title: string; why: string; hypothesis: string; verdict: string };
+export type PingSuggestion = { kind: string; doc: string; title: string; why: string; hypothesis: string; verdict: string; who?: string | null; excerpt?: string; strength?: "found" | "might help" };
 export type PingCycle = {
   turn: number; user: string; reply: string | null; stages: Record<PingStageName, PingStage>;
   focus: PingFocus; snapshot?: { id: string; kind: string; claim: string; conf: number; status: string; l1: string | null }[];

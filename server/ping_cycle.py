@@ -34,7 +34,7 @@ and the real next message as ground truth for the probes and hypotheses.
   GET    /api/ping/chats                 replayable real chats (from /api/assist/chats)
   POST   /api/ping/sessions              {dataset, chat_id?} -> new session
   POST   /api/ping/sessions/{id}/next    replay: run the cycle on the chat's next user turn
-  POST   /api/ping/sessions/{id}/say     {message}: the chat model replies, then the cycle runs on both
+  POST   /api/ping/sessions/{id}/say     {message}: the cycle runs, the chat model replies with Ping's find, then the follow-ups
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
   DELETE /api/ping/sessions              reset (also clears the agent's run list)
@@ -57,11 +57,14 @@ import datasets as DS
 
 router = APIRouter(prefix="/api/ping", tags=["Ping cycle"])
 
-STAGES = ["observe", "update", "check", "probe", "gate", "dive", "suggest", "learn"]
+STAGES = ["observe", "update", "check", "gate", "dive", "suggest", "probe", "learn"]
 MAX_SESSIONS = 30
 MAX_ACTIVE = 4                 # live hypotheses kept
 NEW_CONF = 0.35
+ASKED_CONF = 0.60
+PREFER = {"idea": ("agent-", "tool-", "step-"), "insight": ("chat-",)}   # record kinds each hypothesis kind is after              # a new hypothesis the user asked for outright starts confirmed, near the gate
 GATE_CONF = 0.65
+MIN_AGREE = 2                  # an unscoped hypothesis holds up only if its search shares 2+ of the top 5 docs with the user's own words
 ECHO_SIM = 0.85                # a message this close to a follow-up counts as taking it
 SCOPE_NODES = 40
 DELTA = {"support": 0.15, "support_probe": 0.30, "contradict": -0.25, "neutral": -0.05,
@@ -145,6 +148,7 @@ def _stage(cycle: dict, name: str, status: str, title: str, detail: str = "", t0
 # ───────────────────────── prompts ─────────────────────────
 
 _HYP = ('{"kind": "artifact" | "insight" | "idea", "claim": "<what would help and where it lives, at most 15 words>", '
+        '"asked": true | false, '
         '"answer_type": "records" | "document" | "detail", '
         '"target": "chat" | "file" | "agent" | "step" | "tool" | "user" | "any", '
         '"scope": {"users": [], "teams": [], "agents": [], "files": [], "chats": [], "terms": []}, '
@@ -179,8 +183,11 @@ Update the profile from the NEW USER MESSAGE. Reply with JSON only:
  "retire": ["<id>"]}}
 
 Rules:
-- updates: one per listed hypothesis. support = the message points the same way (mentions its records or terms, asks for that kind of help); contradict = it moves away (another system, tool or topic, or rules it out); neutral = no signal.
-- new: only for needs the listed hypotheses don't cover, at most 2. Chats cover any subject, not only Agent Hub; don't assume agents or files unless the user says so.
+- updates: one per listed hypothesis. support = the message asks for THAT hypothesis' kind of help (a question about how others handled it supports an insight hypothesis, not an automation one); contradict = it moves away (another system, tool or topic, or rules it out); neutral = no signal. Being on the same topic is not support.
+- new: only for needs the listed hypotheses don't cover, at most 2. Every hypothesis must follow from something the user actually said they need; never propose one just because a matching record exists in KNOWN RECORDS. Chats cover any subject, not only Agent Hub.
+- Use the user's meaning of a word. In particular "agent" in KNOWN RECORDS means an Agent Hub AI assistant, but a user talking about Caldera, C2, implants, beacons or hosts means a C2 agent (an implant on a machine). Don't turn a C2-agent problem into an Agent Hub hypothesis unless the user asks about AI agents or automation.
+- kinds: an "insight" hypothesis is about how other people handled the same problem, so it looks for past chats: answer_type "document", target "chat".
+- asked: true only when the NEW message explicitly asks for exactly this kind of help (e.g. "is anyone automating this?" for an idea hypothesis about automation); otherwise false.
 - scope: ONLY names the user actually wrote. facts: only what the user stated; "" otherwise."""
 
 _PROBE_PROMPT = """You write the follow-up suggestions a chat app shows under the assistant's reply. The USER clicks one and it is sent to the assistant as the user's next message.
@@ -226,6 +233,45 @@ def _user_voice(text: str) -> bool:
     return bool(text) and not _ASKS_THE_USER.search(text)
 
 
+def _who(L: dict, doc: str) -> Optional[str]:
+    """The people a record is from (uploader, chat author, agent owner), with their team."""
+    G = L["G"]
+    people = []
+    for n in L["doc_nodes"].get(doc, []):
+        if G.nodes[n].get("entity_type") == "User":
+            people.append(n)
+            continue
+        users = [u for u in G.neighbors(n) if G.nodes[u].get("entity_type") == "User"]
+        # the owner: who created the agent, uploaded the file, opened the chat -- not everyone who installed it
+        owners = [u for u in users if set((G.edges[u, n].get("keywords") or "").split(",")) & {"created", "uploaded", "opened"}]
+        for u in owners or users:
+            if u not in people:
+                people.append(u)
+    out = []
+    for u in people[:3]:
+        team = next((t.split(": ", 1)[-1] for t in G.neighbors(u) if G.nodes[t].get("entity_type") == "Team"), None)
+        out.append(f"{u} ({team})" if team else u)
+    return ", ".join(out) or None
+
+
+def _kind_of(doc: str) -> str:
+    """What a found record is, for the chime-in label: an agent/tool/step is an idea, someone's chat an
+    insight, anything else (files, guides, catalogs) an artifact."""
+    if doc.startswith(("agent-", "tool-", "step-")):
+        return "idea"
+    return "insight" if doc.startswith(("chat-", "person-")) else "artifact"
+
+
+def _card_summary(L: dict, doc: str) -> Optional[str]:
+    """The record card's own summary: for a chat, what happened and how it ended (chat_review);
+    for an agent its purpose; for a file its opening text."""
+    for line in (L["cards"].get(doc) or "").splitlines():
+        for key in ("Summary:", "Purpose:", "Opening text:"):
+            if line.startswith(key):
+                return line[len(key):].strip()
+    return None
+
+
 def _hyp_lines(s: Session) -> str:
     live = _live(s)
     return "\n".join(f"  {h['id']} ({h['kind']}, {h['confidence']:.2f}): {h['claim']}" for h in live) or "  (none yet)"
@@ -242,8 +288,11 @@ def _clip(t: str, n: int) -> str:
 
 # ───────────────────────── the cycle ─────────────────────────
 
-async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Optional[str] = None) -> dict:
-    """One full cycle for a user message (and, in a replay, the reply that followed it)."""
+async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Optional[str] = None,
+                   chat: bool = False) -> dict:
+    """One full cycle for a user message. Replays pass the real reply; chat=True (a typed
+    message) has the chat model answer after Ping's suggest stage, with Ping's find in hand,
+    so the reply and the chime-in agree. The follow-ups are written after the reply."""
     from retrieval import vector_provider as vp
     L = A._layers(s.dataset)
     turn = len(s.cycles) + 1
@@ -253,11 +302,14 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
              "focus": {}, "eval": {}, "at": time.time()}
     s.cycles.append(cycle)
     s.pending = None   # the cycle now carries this turn (message + reply)
-    exclude = set(s.profile["suggested"])
+    own = set()
     if s.chat:
-        exclude.add(s.chat["doc"])     # a replayed chat must not find itself
+        own.add(s.chat["doc"])         # a replayed chat must not find itself
         if s.chat.get("author"):       # ...nor point the user at their own activity page
-            exclude.add(f"person-{s.chat['author']}.md")
+            own.add(f"person-{s.chat['author']}.md")
+    # the L1 check sees everything but the user's own records (a hypothesis Ping already acted on
+    # must not look unsupported); the dive skips what was already suggested, so nothing repeats
+    exclude = own | set(s.profile["suggested"])
     P = s.profile
 
     # 1 observe ─────────────────────────────────────────────
@@ -319,9 +371,13 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     born = []
     for raw in (A._clean_hyps(u.get("new")) if u.get("new") else []):
         kind = next((x.get("kind") for x in (u.get("new") or []) if isinstance(x, dict) and x.get("claim", "").strip()[:300] == raw["claim"]), None)
-        h = {**raw, "id": f"h{next(s._hid)}", "kind": kind if kind in KINDS else "artifact", "confidence": NEW_CONF,
-             "status": "active", "born": turn, "confirmed": False, "history": [], "l1": None, "top_streak": 0}
-        h["history"].append({"turn": turn, "delta": NEW_CONF, "source": "new", "why": "proposed", "conf": NEW_CONF})
+        src = next((x for x in (u.get("new") or []) if isinstance(x, dict) and x.get("claim", "").strip()[:300] == raw["claim"]), {})
+        asked = src.get("asked") is True   # the user asked for exactly this: that is the confirmation
+        conf = ASKED_CONF if asked else NEW_CONF
+        h = {**raw, "id": f"h{next(s._hid)}", "kind": kind if kind in KINDS else "artifact", "confidence": conf,
+             "status": "active", "born": turn, "confirmed": asked, "history": [], "l1": None, "top_streak": 0}
+        h["history"].append({"turn": turn, "delta": conf, "source": "asked" if asked else "new",
+                             "why": "the user asked for this directly" if asked else "proposed", "conf": conf})
         P["hypotheses"].append(h)
         born.append(h["id"])
     live = sorted(_live(s), key=lambda h: -h["confidence"])
@@ -343,10 +399,16 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     # 3 check on L1 ─────────────────────────────────────────
     t0 = time.perf_counter()
     convo = A._convo(s.turns)
+    # "the user's own words" for the checks and searches: their last few messages together. The
+    # latest alone can be content-free ("has anyone else seen this?") and would make every
+    # hypothesis look like it drifted.
+    user_words = _clip(" ".join([t["content"] for t in s.turns if t["role"] == "user"][-3:]), 700)
     checks, focus = [], {"hyps": {}}
     for h in _live(s):
+        if h["kind"] == "insight" and h["answer_type"] == "records" and not any(h["scope"].get(k) for k in ("users", "teams", "agents", "files", "chats")):
+            h["answer_type"], h["target"] = "document", "chat"   # "how did others handle it": search past chats
         v = await asyncio.to_thread(A._validate, L, {k: h[k] for k in ("claim", "answer_type", "target", "scope", "query")},
-                                    convo, user_msg, exclude)
+                                    convo, user_words, own, MIN_AGREE)
         h["target"] = v["_h"]["target"]
         h["scope"] = v["_h"]["scope"]
         _bump(h, DELTA[v["verdict"]], turn, "L1 check", v["why"])
@@ -371,7 +433,91 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     _stage(cycle, "check", "done", f"{sum(c['verdict'] == 'validated' for c in checks)} of {len(checks)} held up on the graph",
            f"top: {top['id']} ({top['confidence']:.2f}) {top['claim']}" if top else "no live hypothesis", t0, checks=checks)
 
-    # 4 probe ───────────────────────────────────────────────
+    # 4 gate ────────────────────────────────────────────────
+    # The confident hypotheses in order; the first that passes every criterion is acted on.
+    # A hypothesis that was just acted on falls through to the next, so a follow-up question
+    # ("how did they fix it?") can surface the next most useful thing instead of silence.
+    t0 = time.perf_counter()
+
+    def criteria(h: dict) -> list:
+        return [
+            {"name": "about work", "ok": P["stage"] in ("exploring", "working") and bool(P["facts"]["what"]),
+             "value": f"stage {P['stage']}; what: {P['facts']['what'] or '?'}"},
+            {"name": f"confidence ≥ {GATE_CONF}", "ok": h["confidence"] >= GATE_CONF, "value": f"{h['confidence']:.2f}"},
+            {"name": "held up on L1 this turn", "ok": (h.get("l1") or {}).get("verdict") == "validated",
+             "value": (h.get("l1") or {}).get("verdict")},
+            {"name": "confirmed by the user", "ok": bool(h.get("confirmed")),
+             "value": "a supporting message or follow-up" if h.get("confirmed") else "not yet"},
+            {"name": "not a repeat", "ok": not any((c.get("suggestion") or {}).get("hypothesis") == h["id"] for c in s.cycles[-3:-1]),
+             "value": "no suggestion from it in the last 2 turns"},
+        ]
+
+    ranked = sorted(_live(s), key=lambda h: -h["confidence"])
+    tried = [(h, criteria(h)) for h in ranked]
+    passing = next(((h, c) for h, c in tried if all(x["ok"] for x in c)), None)
+    gate_h, crit = passing or (tried[0] if tried else (None, []))
+    open_ = passing is not None
+    fell = open_ and top and gate_h["id"] != top["id"]
+    _stage(cycle, "gate", "done",
+           (f"Open: acting on {gate_h['id']}" + (f" (top {top['id']} was just used)" if fell else "")) if open_ else "Closed: keep listening",
+           f"{sum(c['ok'] for c in crit)} of {len(crit)} criteria for {gate_h['id']}" if gate_h else "no hypothesis yet", t0,
+           open=open_, criteria=crit, hypothesis=gate_h and gate_h["id"],
+           others=[{"id": h["id"], "failed": [x["name"] for x in c if not x["ok"]]} for h, c in tried if h is not gate_h])
+
+    # 5 dive L2 / 6 suggest ─────────────────────────────────
+    cycle["suggestion"] = None
+    if not open_:
+        _stage(cycle, "dive", "skip", "Not diving: the gate is closed", "")
+        _stage(cycle, "suggest", "skip", "Stayed quiet", "the gate is closed")
+    else:
+        t0 = time.perf_counter()
+        log = _Log()
+        h = gate_h
+        hv = {k: h[k] for k in ("claim", "answer_type", "target", "scope", "query")}
+        docs = await asyncio.to_thread(A._execute, log, L, hv, h["_v"], user_words, exclude)
+        pref = PREFER.get(h["kind"])
+        if pref:   # an idea is answered by an agent/tool/step, an insight by someone's chat: when the search
+            mine = [d for d in docs if d["doc"].startswith(pref)]   # found any, only those go to the check
+            if mine:
+                docs = mine
+        # judged against what THIS hypothesis is after (what the user is asking for now), not the overall
+        # goal: otherwise a record about the general problem beats the agent the user just asked about
+        goal = {"goal": f"{h['claim']} (overall: {P['goal']})", "need": h["claim"]}
+        chk = await A._dive_and_check(log, L, goal, hv, docs, user_words, exclude)
+        if chk.get("best"):
+            pick = docs[chk["best"] - 1]
+            docs = [pick] + [d for d in docs if d is not pick]
+        ev_nodes = [n for e in log.events if e["kind"] == "evidence" for x in e["data"].get("evidence", [])
+                    for n in L["doc_nodes"].get(L["alias"].get(x["doc"], x["doc"]), [])[:1]]
+        cycle["focus"]["evidence"] = ev_nodes
+        _stage(cycle, "dive", "done", f"{len(docs)} doc(s) via the {h['answer_type']} route · check: {chk['verdict']}",
+               chk.get("why", ""), t0, steps=log.events, check=chk,
+               docs=[{"doc": d["doc"], "title": A._title(L, d["doc"]), "via": d["via"]} for d in docs[:6]])
+        t0 = time.perf_counter()
+        pick = next((d for d in docs if d["doc"] not in P["suggested"]), None)
+        if pick and chk["verdict"] in ("answers", "partial"):   # "partial" is offered softly, as "might help"
+            excerpt = next((x["excerpt"] for e in log.events if e["kind"] == "evidence"
+                            for x in e["data"].get("evidence", []) if x["doc"] == pick["doc"]), None) or _clip(pick["text"], 700)
+            sug = {"kind": _kind_of(pick["doc"]), "doc": pick["doc"], "title": A._title(L, pick["doc"]), "why": chk.get("why", ""),
+                   "hypothesis": h["id"], "verdict": chk["verdict"], "who": _who(L, pick["doc"]), "excerpt": excerpt,
+                   "summary": _card_summary(L, pick["doc"]), "turn": turn,
+                   "strength": "found" if chk["verdict"] == "answers" else "might help"}
+            cycle["suggestion"] = sug
+            P["suggested"].append(pick["doc"])
+            cycle["focus"]["suggestion"] = L["doc_nodes"].get(pick["doc"], [])[:1]
+            _stage(cycle, "suggest", "done", f"Suggested ({sug['kind']}, {sug['strength']}): {sug['title']}", sug["why"], t0, suggestion=sug)
+        else:
+            _stage(cycle, "suggest", "skip",
+                   f"Stayed quiet: the evidence check said {chk['verdict']}" if pick else "Stayed quiet: nothing new to suggest",
+                   chk.get("why", ""), t0, check=chk)
+
+    # the chat model answers now, after Ping's suggest, so it can use what Ping found
+    if chat:
+        earlier = [c["suggestion"] for c in s.cycles[:-1] if c.get("suggestion")]
+        reply = await _chat_reply(s, user_msg, cycle.get("suggestion"), earlier)
+        cycle["reply"] = reply
+
+    # 7 probe ───────────────────────────────────────────────
     t0 = time.perf_counter()
     open_h = [h for h in _live(s)]
     if reply is None and not open_h:
@@ -392,8 +538,11 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
                 dropped.append(text)      # the assistant questioning the user, not the user asking
                 continue
             if len(new_probes) < 3:
+                tests = x.get("tests")
+                if isinstance(tests, list):   # the model sometimes names several; keep the first real one
+                    tests = next((t for t in tests if t in ids), None)
                 p = {"id": f"p{next(s._pid)}", "text": text,
-                     "tests": x.get("tests") if x.get("tests") in ids else None, "turn": turn, "used": None, "sim": None}
+                     "tests": tests if isinstance(tests, str) and tests in ids else None, "turn": turn, "used": None, "sim": None}
                 P["probes"].append(p)
                 new_probes.append(p)
         _stage(cycle, "probe", "done", f"{len(new_probes)} follow-ups offered, {sum(1 for p in new_probes if p['tests'])} lean toward a hypothesis",
@@ -401,62 +550,6 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
                + (f"; dropped {len(dropped)} that questioned the user" if dropped else ""), t0, probes=new_probes, dropped=dropped)
         if next_msg is not None:
             cycle["eval"]["next_user"] = _clip(next_msg, 300)
-
-    # 5 gate ────────────────────────────────────────────────
-    t0 = time.perf_counter()
-    crit = []
-    if top:
-        crit = [
-            {"name": "about work", "ok": P["stage"] in ("exploring", "working") and bool(P["facts"]["what"]),
-             "value": f"stage {P['stage']}; what: {P['facts']['what'] or '?'}"},
-            {"name": f"confidence ≥ {GATE_CONF}", "ok": top["confidence"] >= GATE_CONF, "value": f"{top['confidence']:.2f}"},
-            {"name": "held up on L1 this turn", "ok": (top.get("l1") or {}).get("verdict") == "validated",
-             "value": (top.get("l1") or {}).get("verdict")},
-            {"name": "confirmed by the user", "ok": bool(top.get("confirmed")),
-             "value": "a supporting message or follow-up" if top.get("confirmed") else "not yet"},
-            {"name": "not a repeat", "ok": not any(c.get("suggestion", {}) and c["suggestion"].get("hypothesis") == top["id"]
-                                                   for c in s.cycles[-3:-1]),
-             "value": "no suggestion from it in the last 2 turns"},
-        ]
-    open_ = bool(crit) and all(c["ok"] for c in crit)
-    _stage(cycle, "gate", "done", "Open: enough to suggest" if open_ else "Closed: keep listening",
-           f"{sum(c['ok'] for c in crit)} of {len(crit)} criteria" if crit else "no hypothesis yet", t0,
-           open=open_, criteria=crit, hypothesis=top and top["id"])
-
-    # 6 dive L2 / 7 suggest ─────────────────────────────────
-    cycle["suggestion"] = None
-    if not open_:
-        _stage(cycle, "dive", "skip", "Not diving: the gate is closed", "")
-        _stage(cycle, "suggest", "skip", "Stayed quiet", "the gate is closed")
-    else:
-        t0 = time.perf_counter()
-        log = _Log()
-        h = top
-        hv = {k: h[k] for k in ("claim", "answer_type", "target", "scope", "query")}
-        docs = await asyncio.to_thread(A._execute, log, L, hv, h["_v"], user_msg, exclude)
-        goal = {"goal": P["goal"], "need": h["claim"]}
-        chk = await A._dive_and_check(log, L, goal, hv, docs, user_msg, exclude)
-        if chk.get("best"):
-            pick = docs[chk["best"] - 1]
-            docs = [pick] + [d for d in docs if d is not pick]
-        ev_nodes = [n for e in log.events if e["kind"] == "evidence" for x in e["data"].get("evidence", [])
-                    for n in L["doc_nodes"].get(L["alias"].get(x["doc"], x["doc"]), [])[:1]]
-        cycle["focus"]["evidence"] = ev_nodes
-        _stage(cycle, "dive", "done", f"{len(docs)} doc(s) via the {h['answer_type']} route · check: {chk['verdict']}",
-               chk.get("why", ""), t0, steps=log.events, check=chk,
-               docs=[{"doc": d["doc"], "title": A._title(L, d["doc"]), "via": d["via"]} for d in docs[:6]])
-        t0 = time.perf_counter()
-        pick = next((d for d in docs if d["doc"] not in P["suggested"]), None)
-        if pick and chk["verdict"] in ("answers", "partial"):
-            sug = {"kind": h["kind"], "doc": pick["doc"], "title": A._title(L, pick["doc"]), "why": chk.get("why", ""),
-                   "hypothesis": h["id"], "verdict": chk["verdict"]}
-            cycle["suggestion"] = sug
-            P["suggested"].append(pick["doc"])
-            cycle["focus"]["suggestion"] = L["doc_nodes"].get(pick["doc"], [])[:1]
-            _stage(cycle, "suggest", "done", f"Suggested ({h['kind']}): {sug['title']}", sug["why"], t0, suggestion=sug)
-        else:
-            _stage(cycle, "suggest", "skip", "Stayed quiet: the evidence didn't meet the need",
-                   chk.get("why", ""), t0, check=chk)
 
     # 8 learn ───────────────────────────────────────────────
     t0 = time.perf_counter()
@@ -515,27 +608,47 @@ def _state(s: Session) -> dict:
 # The chat model the user talks to: a plain assistant, as in Open WebUI. It has no access
 # to the knowledge base -- surfacing what the team already has is Ping's job, alongside it.
 CHAT_SYSTEM = ("You are a helpful AI assistant in a team's chat app. Answer the user directly and concisely, "
-               "using markdown where it helps. You do not have access to the team's internal documents, files or past chats.")
+               "using markdown where it helps. You can't see the team's internal documents, files or past chats yourself; "
+               "a teammate assistant, Ping, watches the chat and points the user to anything relevant it finds there. So if the "
+               "user asks whether others hit this, or for internal docs, say Ping will chime in if it finds something, and "
+               "still help with what you can. Don't tell them to search elsewhere, and never address Ping or ask it to do things.")
 
 
-async def _chat_reply(s: Session, msg: str) -> str:
+def _finding_lines(f: dict) -> str:
+    return (f"- {f['kind']}: {f['title']}" + (f" (from {f['who']})" if f.get("who") else "") + "\n"
+            + (f"  what it is / how it ended: {f['summary']}\n" if f.get("summary") else ""))
+
+
+async def _chat_reply(s: Session, msg: str, finding: Optional[dict] = None, earlier: Optional[list] = None) -> str:
     from retrieval import lightrag_provider as lp
     await lp._ensure_session()
-    hist = [{"role": t["role"], "content": t["content"][:4000]} for t in s.turns[-8:]]
-    out = await lp._ollama_llm(msg, system_prompt=CHAT_SYSTEM, history_messages=hist)
+    turns = s.turns[:-1] if s.turns and s.turns[-1]["role"] == "user" and s.turns[-1]["content"] == msg else s.turns
+    hist = [{"role": t["role"], "content": t["content"][:4000]} for t in turns[-8:]]
+    system = CHAT_SYSTEM
+    if earlier:
+        system += ("\n\nEarlier in this chat Ping already pointed the user to:\n" + "".join(_finding_lines(f) for f in earlier)
+                   + "Refer back to these when relevant instead of saying Ping is still looking.")
+    if finding:
+        system += ("\n\nPing just found this in the team's knowledge base for the user's message"
+                   + (" (a partial match: present it as possibly helpful, not as the answer)" if finding.get("strength") == "might help" else "")
+                   + ":\n" + _finding_lines(finding)
+                   + f"  matching passage: {finding.get('excerpt') or ''}\n"
+                   "Use it in your answer where it helps: say Ping found it and who it's from, lead with what it says "
+                   "actually resolved things, and don't claim more than the summary and passage say.")
+    if earlier or finding:
+        system += " Don't promise what Ping will do next; just use what it found."
+    if earlier or finding:
+        system += " Never write links, URLs or placeholders for them; Ping shows the user the link itself."
+    out = await lp._ollama_llm(msg, system_prompt=system, history_messages=hist)
     return (out or "").strip() or "(the chat model returned nothing)"
 
 
 async def _run(s: Session, msg: str, reply: Optional[str], nxt: Optional[str], chat: bool = False):
-    """One turn. chat=True (a typed message): the chat model answers first, then the cycle runs on both."""
+    """One turn. chat=True (a typed message): the cycle runs, the chat model replies (with Ping's find), then the follow-ups."""
     async with s.lock:
         s.status, s.error = "running", None
         try:
-            if chat:
-                s.pending = {"user": msg, "reply": None}
-                reply = await _chat_reply(s, msg)
-                s.pending = {"user": msg, "reply": reply}
-            await run_turn(s, msg, reply, nxt)
+            await run_turn(s, msg, reply, nxt, chat=chat)
             s.status = "done" if s.chat and s.pos >= s.user_turns_total else "idle"
         except Exception as e:
             s.status, s.error = "error", f"{type(e).__name__}: {e}"[:300]

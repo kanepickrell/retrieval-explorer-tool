@@ -449,7 +449,7 @@ def _best_chunk(rows: List[dict]) -> Dict[str, dict]:
     return out
 
 
-def _validate(L: dict, h: dict, convo: str, user_q: str, exclude: set) -> dict:
+def _validate(L: dict, h: dict, convo: str, user_q: str, exclude: set, min_agree: int = 1) -> dict:
     """Check a hypothesis against the graph (and, for content, the chunk index)."""
     sc = h["scope"]
     dropped = [x for k in ("users", "teams", "agents", "files", "chats", "terms") for x in sc[k] if not _grounded(x, convo)]
@@ -510,9 +510,10 @@ def _validate(L: dict, h: dict, convo: str, user_q: str, exclude: set) -> dict:
         own = list(_best_chunk(_chunks(L, user_q, exclude)))[:5]
         mine = list(_best_chunk(_chunks(L, query, exclude)))[:5]
         agree = len(set(own) & set(mine))
-        ok = agree > 0
+        ok = agree >= min_agree
         why = (f"no named records to scope by; its query agrees with the user's own words on {agree} of the top 5 docs"
-               if ok else "drifted: none of its top 5 docs are among those the user's own words find")
+               if ok else f"drifted: only {agree} of its top 5 docs are among those the user's own words find "
+                          f"(needs {min_agree})")
     return {**out, "verdict": "validated" if ok else "weak",
             "score": round(inside / 5 + best + (0.5 if scope else 0), 3), "why": note + why}
 
