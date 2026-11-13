@@ -87,6 +87,28 @@ def slug(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")[:60] or "untitled"
 
 
+def thread(chat: dict, ms: list) -> list:
+    """The chat's displayed conversation, in order. Follows parent links back from the
+    chat's current message: created_at is NOT reliable, because Open WebUI stamps the
+    assistant's placeholder a second before the user message it answers, which put
+    every answer above its question. Message ids are "<chat_id>-<msg_id>" and
+    parent_id is the bare <msg_id>."""
+    by_short = {m["id"].removeprefix(f"{chat['id']}-"): m for m in ms}
+    cur = chat.get("current_message_id")
+    if cur not in by_short:   # no pointer: take the newest leaf
+        parents = {m.get("parent_id") for m in ms}
+        leaves = [k for k in by_short if k not in parents]
+        cur = max(leaves, key=lambda k: int(by_short[k].get("created_at") or 0), default=None)
+    path, seen = [], set()
+    while cur in by_short and cur not in seen:
+        seen.add(cur)
+        path.append(by_short[cur])
+        cur = by_short[cur].get("parent_id")
+    if not path:
+        return sorted(ms, key=lambda m: (int(m.get("created_at") or 0), m.get("role") != "user"))
+    return path[::-1]
+
+
 def main(export_dir: str, out_dir: str) -> None:
     ex, out = Path(export_dir), Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -98,7 +120,7 @@ def main(export_dir: str, out_dir: str) -> None:
         msgs[m["chat_id"]].append(m)
     by_person = defaultdict(list)   # user-NN -> [(date, title, tags, doc)]
     for c in load(ex / "openwebui/chat.json"):
-        turns = sorted(msgs.get(c["id"], []), key=lambda m: int(m.get("created_at") or 0))
+        turns = thread(c, msgs.get(c["id"], []))
         user_chars = sum(len(msg_text(m)) for m in turns if m["role"] == "user")
         if user_chars < MIN_USER_CHARS:
             skipped.append(c["id"])
