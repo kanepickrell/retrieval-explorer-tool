@@ -161,7 +161,7 @@ _UPDATE_PROMPT = """You keep a running profile of what a user is working on in a
 - insight: how someone else (maybe on another team) handled the same thing
 - idea: an agent, tool or automation that could do it for them
 
-KNOWN RECORDS in the team's knowledge base:
+THE TEAM'S KNOWLEDGE BASE:
 {vocab}
 
 PROFILE SO FAR:
@@ -186,8 +186,8 @@ Update the profile from the NEW USER MESSAGE. Reply with JSON only:
 
 Rules:
 - updates: one per listed hypothesis. support = the message asks for THAT hypothesis' kind of help (a question about how others handled it supports an insight hypothesis, not an automation one); contradict = it moves away (another system, tool or topic, or rules it out); neutral = no signal. Being on the same topic is not support.
-- new: only for needs the listed hypotheses don't cover, at most 2. Every hypothesis must follow from something the user actually said they need; never propose one just because a matching record exists in KNOWN RECORDS. Chats cover any subject, not only Agent Hub.
-- Use the user's meaning of a word. In particular "agent" in KNOWN RECORDS means an Agent Hub AI assistant, but a user talking about Caldera, C2, implants, beacons or hosts means a C2 agent (an implant on a machine). Don't turn a C2-agent problem into an Agent Hub hypothesis unless the user asks about AI agents or automation.
+- new: only for needs the listed hypotheses don't cover, at most 2. Every hypothesis must follow from something the user actually said they need. Describe what would help (the kind of document, fix, person or tool), not a record name: name a record only if it is listed above as named or shown. Chats cover any subject, not only Agent Hub.
+- Use the user's meaning of a word. In particular a Hub "agent" is an AI assistant, but a user talking about Caldera, C2, implants, beacons or hosts means a C2 agent (an implant on a machine). Don't turn a C2-agent problem into an Agent Hub hypothesis unless the user asks about AI agents or automation.
 - kinds: an "insight" hypothesis is about how other people handled the same problem, so it looks for past chats: answer_type "document", target "chat".
 - asked: true only when the NEW message explicitly asks for exactly this kind of help (e.g. "is anyone automating this?" for an idea hypothesis about automation); otherwise false.
 - scope: ONLY names the user actually wrote. facts: only what the user stated; "" otherwise."""
@@ -274,6 +274,42 @@ def _card_summary(L: dict, doc: str) -> Optional[str]:
     return None
 
 
+_GENERIC = {"the", "and", "for", "pdf", "md", "txt", "py", "sh", "xml", "json", "yaml", "yml", "docx", "file", "chat", "agent"}
+
+
+def _mentioned(name: str, text: str) -> bool:
+    """Strict: the whole name (minus a file extension) appears, in order, in what the user
+    wrote or was shown. Word overlap is not enough: "range reset runbook" must not count
+    as having mentioned reset_range.sh."""
+    words = A._norm(name).split()
+    while len(words) > 1 and words[-1] in _GENERIC:
+        words.pop()
+    n = " ".join(words)
+    return len(n) >= 3 and f" {n} " in f" {text} "
+
+
+def _known_records(L: dict, s: Session) -> str:
+    """The record names Ping's profile may use: only those the user wrote, or was already
+    shown in a chime-in. Handing it the whole catalog leaked answers into hypotheses
+    (a first message about C2 callbacks produced "the Range-Reset-Runbook-v3.pdf might...")."""
+    G = L["G"]
+    shown = [c["suggestion"]["title"] for c in s.cycles if c.get("suggestion")]
+    text = A._norm(" ".join([t["content"] for t in s.turns if t["role"] == "user"] + shown))
+    short = lambda n: n.split(": ", 1)[-1].rsplit(" [", 1)[0]
+    teams = sorted(short(n) for n, d in G.nodes(data=True) if d.get("entity_type") == "Team")
+    named = {}
+    for n, d in G.nodes(data=True):
+        t = d.get("entity_type")
+        if t in ("User", "Agent", "Skill", "Step", "Tool", "File", "Topic") and _mentioned(short(n), text):
+            named.setdefault(t, set()).add(short(n))
+    named_lines = [f"  {t.lower()}s: {', '.join(sorted(v)[:15])}" for t, v in sorted(named.items())]
+    return ("It holds past chats, uploaded files (docs, scripts, configs), Hub AI agents with their skills, tools "
+            "and workflow steps, and the people who made them"
+            + (f", in teams: {', '.join(teams)}" if teams else "") + ".\n"
+            + ("Records the user has named or already been shown:\n" + "\n".join(named_lines)
+               if named_lines else "The user hasn't named or been shown any specific record yet."))
+
+
 def _hyp_lines(s: Session) -> str:
     live = _live(s)
     return "\n".join(f"  {h['id']} ({h['kind']}, {h['confidence']:.2f}): {h['claim']}" for h in live) or "  (none yet)"
@@ -335,7 +371,7 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     exchange = (f"ASSISTANT (previous reply): {_clip(prev_reply, 1500)}\n" if prev_reply else "") + \
                f"USER (new message): {_clip(user_msg, 2500)}"
     u = await A._llm_json(_UPDATE_PROMPT.format(
-        vocab=A._vocabulary(L), goal=P["goal"] or "(unknown)", stage=P["stage"] or "(unknown)",
+        vocab=_known_records(L, s), goal=P["goal"] or "(unknown)", stage=P["stage"] or "(unknown)",
         who=P["facts"]["who"] or "?", what=P["facts"]["what"] or "?", why=P["facts"]["why"] or "?",
         hyps=_hyp_lines(s), probes=_probe_lines(offered), exchange=exchange, hyp=_HYP),
         "You maintain a user profile from a conversation. Output JSON only.")
