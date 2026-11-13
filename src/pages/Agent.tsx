@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import ReactMarkdown from "react-markdown";
 import clsx from "clsx";
 import {
   Bot, CheckCircle2, CircleDashed, Eye, FileSearch, Filter, GraduationCap, Loader2, MessageSquareQuote,
@@ -281,7 +282,7 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
         <div className="flex gap-2">
           <input value={msg} onChange={(e) => setMsg(e.target.value)} disabled={running}
             onKeyDown={(e) => { if (e.key === "Enter" && msg.trim()) { onSay(msg.trim()); setMsg(""); } }}
-            placeholder="next message" className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none" />
+            placeholder="reply to the assistant…" className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none" />
           <button className="btn" disabled={running || !msg.trim()} onClick={() => { onSay(msg.trim()); setMsg(""); }}><Send size={12} /></button>
         </div>
       )}
@@ -289,34 +290,37 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
         {s.cycles.map((c) => {
           const sel = cycle?.turn === c.turn;
           const offered = probesBy.get(c.turn) ?? [];
+          const live = !s.chat;
+          const clickable = live && !running && c.turn === s.turn;   // follow-ups under the latest live reply can be sent
           return (
             <li key={c.turn} className={clsx("space-y-1.5 rounded-md p-1.5", sel && "bg-surface-2 shadow-[inset_0_0_0_1px_var(--line)]")}>
-              <button onClick={() => onPick(sel ? null : c.turn)} className="block w-full rounded bg-local/15 px-2 py-1.5 text-left text-xs">
-                <span className="mb-0.5 block font-mono text-[10px] text-muted">turn {c.turn} · user</span>
+              <button onClick={() => onPick(sel ? null : c.turn)} className="block w-full rounded bg-local/15 px-2 py-1.5 text-left text-xs"
+                title="Show this turn's cycle">
+                <span className="mb-0.5 block font-mono text-[10px] text-muted">turn {c.turn} · {live ? "you" : "user"}</span>
                 <span className="line-clamp-4 whitespace-pre-wrap">{c.user}</span>
               </button>
+              {c.reply && <Reply text={c.reply} label={live ? `assistant · ${s.chat_model}` : "assistant (real reply)"} full={live} />}
               {c.suggestion && (
                 <div className="rounded border border-good/40 bg-good/10 px-2 py-1.5 text-xs">
-                  <span className="font-mono text-[10px] text-good">Ping · {c.suggestion.kind}</span>
+                  <span className="font-mono text-[10px] text-good">Ping chimes in · {c.suggestion.kind}</span>
                   <div className="text-ink">{c.suggestion.title}</div>
                   <div className="text-muted">{c.suggestion.why}</div>
                 </div>
               )}
-              {c.reply && (
-                <div className="rounded bg-surface-2 px-2 py-1.5 text-xs text-muted">
-                  <span className="mb-0.5 block font-mono text-[10px]">assistant (real reply)</span>
-                  <span className="line-clamp-3 whitespace-pre-wrap">{c.reply}</span>
-                </div>
-              )}
               {offered.length > 0 && (
                 <ul className="space-y-1 pl-2">
+                  {clickable && <li className="font-mono text-[10px] text-muted">follow-ups: click one to send it</li>}
                   {offered.map((p) => (
                     <li key={p.id} className="flex gap-1.5 text-[11px]">
                       <span className={clsx("shrink-0 font-mono text-[10px]", p.used ? "text-good" : p.used === false ? "text-muted/60" : "text-muted")}
-                        title={p.used == null ? "waiting for the next message" : p.used ? "the next real message took this follow-up" : `not taken${p.sim != null ? ` (similarity ${p.sim.toFixed(2)})` : ""}`}>
+                        title={p.used == null ? "waiting for the next message" : p.used ? "the next message took this follow-up" : `not taken${p.sim != null ? ` (similarity ${p.sim.toFixed(2)})` : ""}`}>
                         {p.used ? "✓" : p.used === false ? "–" : "…"} {p.id}{p.tests ? `→${p.tests}` : ""}
                       </span>
-                      <span className={clsx(p.used ? "text-ink" : "text-muted")}>{p.text}</span>
+                      {clickable ? (
+                        <button onClick={() => onSay(p.text)} className="rounded border border-line px-1.5 py-0.5 text-left text-ink hover:border-local/60 hover:text-local">
+                          {p.text}
+                        </button>
+                      ) : <span className={clsx(p.used ? "text-ink" : "text-muted")}>{p.text}</span>}
                     </li>
                   ))}
                 </ul>
@@ -325,9 +329,35 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
             </li>
           );
         })}
-        {running && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> running the cycle…</li>}
+        {s.pending && (
+          <li className="space-y-1.5 rounded-md p-1.5">
+            <div className="rounded bg-local/15 px-2 py-1.5 text-xs">
+              <span className="mb-0.5 block font-mono text-[10px] text-muted">turn {s.turn + 1} · you</span>
+              <span className="whitespace-pre-wrap">{s.pending.user}</span>
+            </div>
+            {s.pending.reply ? <Reply text={s.pending.reply} label={`assistant · ${s.chat_model}`} full />
+              : <div className="flex items-center gap-2 px-1 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> assistant is typing…</div>}
+          </li>
+        )}
+        {running && !s.pending?.user && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> Ping is running its cycle…</li>}
+        {running && s.pending?.reply && <li className="flex items-center gap-2 px-1.5 text-xs text-muted"><Loader2 size={12} className="animate-spin" /> Ping is running its cycle…</li>}
       </ol>
     </section>
+  );
+}
+
+function Reply({ text, label, full }: { text: string; label: string; full?: boolean }) {
+  const [open, setOpen] = useState(!!full);
+  return (
+    <div className="rounded bg-surface-2 px-2 py-1.5 text-xs">
+      <span className="mb-0.5 flex items-center font-mono text-[10px] text-muted">
+        {label}
+        <button className="ml-auto hover:text-ink" onClick={() => setOpen((o) => !o)}>{open ? "less" : "more"}</button>
+      </span>
+      {open ? (
+        <div className="answer-md max-h-80 overflow-auto text-ink/90"><ReactMarkdown>{text}</ReactMarkdown></div>
+      ) : <span className="line-clamp-3 whitespace-pre-wrap text-muted">{text}</span>}
+    </div>
   );
 }
 

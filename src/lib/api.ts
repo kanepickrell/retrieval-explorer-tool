@@ -494,6 +494,10 @@ export type PingSessionSummary = {
 };
 export type PingSession = PingSessionSummary & {
   error: string | null; chat: { chat_id: string; doc: string; title: string; author: string | null } | null;
+  /** a typed turn in flight: the message, and the chat model's reply once it has answered */
+  pending: { user: string; reply: string | null } | null;
+  /** the model the user chats with (and Ping thinks with) */
+  chat_model: string;
   turns: ChatTurn[]; cycles: PingCycle[];
   profile: { goal: string; stage: string; facts: { who: string; what: string; why: string };
              hypotheses: PingHypothesis[]; probes: PingProbe[]; suggested: string[] };

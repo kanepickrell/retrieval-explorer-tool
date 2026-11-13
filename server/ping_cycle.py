@@ -34,7 +34,7 @@ and the real next message as ground truth for the probes and hypotheses.
   GET    /api/ping/chats                 replayable real chats (from /api/assist/chats)
   POST   /api/ping/sessions              {dataset, chat_id?} -> new session
   POST   /api/ping/sessions/{id}/next    replay: run the cycle on the chat's next user turn
-  POST   /api/ping/sessions/{id}/say     {message}: run the cycle on a typed message
+  POST   /api/ping/sessions/{id}/say     {message}: the chat model replies, then the cycle runs on both
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
   DELETE /api/ping/sessions              reset (also clears the agent's run list)
@@ -84,6 +84,7 @@ class Session:
                         "hypotheses": [], "probes": [], "suggested": []}
         self.cycles: List[dict] = []
         self.status = "idle"               # idle | running | error | done
+        self.pending: Optional[dict] = None  # typed turn in flight: {"user", "reply"} while the chat model answers
         self.error: Optional[str] = None
         self._hid, self._pid = itertools.count(1), itertools.count(1)
         self.lock = asyncio.Lock()
@@ -220,6 +221,7 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     cycle = {"turn": turn, "user": user_msg, "reply": reply, "stages": {k: {"status": "pending"} for k in STAGES},
              "focus": {}, "eval": {}, "at": time.time()}
     s.cycles.append(cycle)
+    s.pending = None   # the cycle now carries this turn (message + reply)
     exclude = set(s.profile["suggested"])
     if s.chat:
         exclude.add(s.chat["doc"])     # a replayed chat must not find itself
@@ -465,20 +467,43 @@ class Say(BaseModel):
 
 
 def _state(s: Session) -> dict:
+    from retrieval import lightrag_provider as lp
     return {**s.summary(), "error": s.error, "chat": s.chat and {k: s.chat[k] for k in ("chat_id", "doc", "title", "author")},
-            "turns": s.turns, "profile": s.profile, "cycles": s.cycles, "stages": STAGES}
+            "turns": s.turns, "profile": s.profile, "cycles": s.cycles, "stages": STAGES,
+            "pending": s.pending, "chat_model": lp.LLM}
 
 
-async def _run(s: Session, msg: str, reply: Optional[str], nxt: Optional[str]):
+# The chat model the user talks to: a plain assistant, as in Open WebUI. It has no access
+# to the knowledge base -- surfacing what the team already has is Ping's job, alongside it.
+CHAT_SYSTEM = ("You are a helpful AI assistant in a team's chat app. Answer the user directly and concisely, "
+               "using markdown where it helps. You do not have access to the team's internal documents, files or past chats.")
+
+
+async def _chat_reply(s: Session, msg: str) -> str:
+    from retrieval import lightrag_provider as lp
+    await lp._ensure_session()
+    hist = [{"role": t["role"], "content": t["content"][:4000]} for t in s.turns[-8:]]
+    out = await lp._ollama_llm(msg, system_prompt=CHAT_SYSTEM, history_messages=hist)
+    return (out or "").strip() or "(the chat model returned nothing)"
+
+
+async def _run(s: Session, msg: str, reply: Optional[str], nxt: Optional[str], chat: bool = False):
+    """One turn. chat=True (a typed message): the chat model answers first, then the cycle runs on both."""
     async with s.lock:
         s.status, s.error = "running", None
         try:
+            if chat:
+                s.pending = {"user": msg, "reply": None}
+                reply = await _chat_reply(s, msg)
+                s.pending = {"user": msg, "reply": reply}
             await run_turn(s, msg, reply, nxt)
             s.status = "done" if s.chat and s.pos >= s.user_turns_total else "idle"
         except Exception as e:
             s.status, s.error = "error", f"{type(e).__name__}: {e}"[:300]
             if s.cycles:
                 s.cycles[-1]["error"] = s.error
+        finally:
+            s.pending = None
 
 
 @router.get("/chats")
@@ -525,7 +550,7 @@ async def say(sid: str, req: Say, wait: bool = False):
         raise HTTPException(404, "no such session")
     if s.lock.locked():
         raise HTTPException(409, "a turn is already running")
-    task = _run(s, req.message.strip(), None, None)
+    task = _run(s, req.message.strip(), None, None, chat=True)
     if wait:
         await task
     else:

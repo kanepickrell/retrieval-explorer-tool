@@ -50,9 +50,10 @@ def _load_index(storage_dir: str = None) -> Dict:
     dim = int(d["embedding_dim"])
     raw = base64.b64decode(d["matrix"])
     # float32 little-endian, row-major [n, dim], aligned with data order
-    import struct
-    flat = struct.unpack(f"<{len(raw)//4}f", raw)
-    mat = [list(flat[i * dim:(i + 1) * dim]) for i in range(len(data))]
+    import numpy as np
+    # float32 rows; NumPy does the scoring (fast, and it releases the GIL, so a search
+    # running in a worker thread doesn't stall the web server)
+    mat = np.frombuffer(raw, dtype="<f4").reshape(len(data), dim).copy()
     _INDEX[key] = {
         "ids": [r.get("__id__", "") for r in data],
         "titles": [r.get("file_path", r.get("full_doc_id", "")) for r in data],
@@ -116,19 +117,19 @@ def cosine_for(chunk_ids: List[str], query: str, storage_dir: str = None) -> Dic
     """cosine(query, chunk) for the given chunk ids, using the same query
     embedding as search(). Lets graph modes report a real relevance score that
     is directly comparable with vector mode's. Missing ids are omitted."""
+    import numpy as np
     idx = _load_index(storage_dir)
-    if idx["error"] or not idx["mat"]:
+    if idx["error"] or not len(idx["mat"]):
         return {}
     qv = _embed_query(query)
     if qv is None:
         return {}
     row = idx.setdefault("row_of", {cid: i for i, cid in enumerate(idx["ids"])})
-    out = {}
-    for cid in chunk_ids:
-        i = row.get(cid)
-        if i is not None:
-            out[cid] = round(float(sum(a * b for a, b in zip(qv, idx["mat"][i]))), 4)
-    return out
+    hits = [(cid, row[cid]) for cid in chunk_ids if cid in row]
+    if not hits:
+        return {}
+    sims = idx["mat"][[i for _, i in hits]] @ np.asarray(qv, dtype=np.float32)
+    return {cid: round(float(v), 4) for (cid, _), v in zip(hits, sims)}
 
 
 # real pipeline steps of the last search(): [{label, detail, stat, ms}]
@@ -145,7 +146,7 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
     t = time.perf_counter()
     idx = _load_index(storage_dir)
     load_ms = round((time.perf_counter() - t) * 1000, 1)
-    if idx["error"] or not idx["mat"]:
+    if idx["error"] or not len(idx["mat"]):
         return []
     t = time.perf_counter()
     qv = _embed_query(query)
@@ -153,17 +154,13 @@ def search(query: str, limit: int = 20, storage_dir: str = None) -> List[Dict]:
     if qv is None:
         return []
     t = time.perf_counter()
+    import numpy as np
     mat, titles, contents, ids = idx["mat"], idx["titles"], idx["contents"], idx["ids"]
     # rows are normalized and qv is normalized -> cosine == dot
-    scored = []
-    for i, row in enumerate(mat):
-        dot = 0.0
-        for a, b in zip(qv, row):
-            dot += a * b
-        scored.append((dot, i))
-    scored.sort(reverse=True)
+    sims = mat @ np.asarray(qv, dtype=np.float32)
+    order = np.argsort(-sims)[:limit]
     out = []
-    for dot, i in scored[:limit]:
+    for dot, i in ((float(sims[i]), int(i)) for i in order):
         title = titles[i] or ids[i]
         out.append({"id": title, "label": title, "type": "chunk",
                     "description": (contents[i] or "")[:200],
@@ -197,16 +194,18 @@ def contents_for(titles: List[str], char_cap: int = 1800, storage_dir: str = Non
 def contexts(query: str, limit: int = 5, storage_dir: str = None, char_cap: int = 1800) -> List[Dict]:
     """Top-k hits with FULL (capped) chunk content, for naive-RAG generation.
     Same ranking/doc-level dedup as search(), but returns usable context text."""
+    import numpy as np
     idx = _load_index(storage_dir)
-    if idx["error"] or not idx["mat"]:
+    if idx["error"] or not len(idx["mat"]):
         return []
     qv = _embed_query(query)
     if qv is None:
         return []
     mat, titles, contents, ids = idx["mat"], idx["titles"], idx["contents"], idx["ids"]
     best: Dict[str, Dict] = {}
-    for i, row in enumerate(mat):
-        dot = sum(a * b for a, b in zip(qv, row))
+    sims = mat @ np.asarray(qv, dtype=np.float32)
+    for i in range(len(ids)):
+        dot = float(sims[i])
         title = titles[i] or ids[i]
         prev = best.get(title)
         if prev is None or dot > prev["relevance_score"]:
