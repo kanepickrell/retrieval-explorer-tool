@@ -23,8 +23,8 @@ Per user turn, eight stages (each recorded, so the Agent page can show them):
   5 dive L2   scoped retrieval for the top hypothesis + the evidence check
               (agent_loop._execute / _dive_and_check), limited to records the
               user's own words rank highly (OWN_TOP / PARTIAL_TOP)
-  6 suggest   one record, framed by kind (artifact / insight / idea), with the reason
-     (typed sessions: the chat model replies here, with Ping's find as background)
+  6 suggest   one record, framed by kind (artifact / insight / idea), with the reason;
+              this is Ping's chime-in, shown below the reply (which was already sent up front)
   7 probe     LLM writes the 3 follow-ups shown after the reply, in the user's voice:
               each useful on its own, and where possible leaning toward different
               open hypotheses so the pick tells them apart
@@ -40,7 +40,7 @@ and the real next message as ground truth for the probes and hypotheses.
   GET    /api/ping/chats                 replayable real chats (from /api/assist/chats)
   POST   /api/ping/sessions              {dataset, chat_id?} -> new session
   POST   /api/ping/sessions/{id}/next    replay: run the cycle on the chat's next user turn
-  POST   /api/ping/sessions/{id}/say     {message}: the cycle runs, the chat model replies with Ping's find, then the follow-ups
+  POST   /api/ping/sessions/{id}/say     {message}: the assistant replies at once; Ping's cycle runs in the background and chimes in below if it finds something
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
   DELETE /api/ping/sessions              reset (also clears the agent's run list)
@@ -353,8 +353,9 @@ def _clip(t: str, n: int) -> str:
 async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Optional[str] = None,
                    chat: bool = False) -> dict:
     """One full cycle for a user message. Replays pass the real reply; chat=True (a typed
-    message) has the chat model answer after Ping's suggest stage, with Ping's find in hand,
-    so the reply and the chime-in agree. The follow-ups are written after the reply."""
+    message) has the chat model answer UP FRONT (before the expensive stages), blind to the
+    cycle, so the user isn't blocked on Ping; the suggest stage then chimes in separately
+    below the reply. The follow-ups are written after the cycle."""
     from retrieval import vector_provider as vp
     L = A._layers(s.dataset)
     turn = len(s.cycles) + 1
@@ -364,6 +365,18 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
              "focus": {}, "eval": {}, "at": time.time()}
     s.cycles.append(cycle)
     s.pending = None   # the cycle now carries this turn (message + reply)
+
+    # The assistant answers immediately, blind to Ping's cycle, so the user is never blocked on
+    # the dive + evidence check. Ping runs below and chimes in separately (the suggest stage).
+    # Earlier findings already shown stay as background for continuity. Replays keep the real reply.
+    reply_appended = False
+    if chat:
+        earlier = [c["suggestion"] for c in s.cycles[:-1] if c.get("suggestion")]
+        reply = await _chat_reply(s, user_msg, None, earlier)
+        cycle["reply"] = reply
+        s.turns.append({"role": "assistant", "content": reply})
+        reply_appended = True
+
     own = set()
     if s.chat:
         own.add(s.chat["doc"])         # a replayed chat must not find itself
@@ -613,11 +626,7 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         else:
             h["dry"] = h["query"]
 
-    # the chat model answers now, after Ping's suggest, so it can use what Ping found
-    if chat:
-        earlier = [c["suggestion"] for c in s.cycles[:-1] if c.get("suggestion")]
-        reply = await _chat_reply(s, user_msg, cycle.get("suggestion"), earlier)
-        cycle["reply"] = reply
+    # (the reply was already produced up front, before this cycle ran)
 
     # 7 probe ───────────────────────────────────────────────
     t0 = time.perf_counter()
@@ -664,7 +673,7 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     _stage(cycle, "learn", "done", "Profile after this turn", "; ".join(moves) or "no change", t0, moves=moves)
     for h in P["hypotheses"]:
         h.pop("_v", None)
-    if reply:
+    if reply and not reply_appended:
         s.turns.append({"role": "assistant", "content": reply})
     return cycle
 
