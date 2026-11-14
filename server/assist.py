@@ -167,6 +167,10 @@ class AssistRequest(BaseModel):
     require_context: bool = False
     # Apply the dataset's ping.json curation (docs Ping must never suggest).
     curated: bool = False
+    # "assist" (rewrite -> retrieve -> score -> judge, stateless) or "ping" (the full,
+    # session-based Ping cycle keyed by chat_id). The Open WebUI chime-in bridge picks this.
+    engine: str = Field("assist", pattern="^(assist|ping)$")
+    chat_id: Optional[str] = None         # Open WebUI chat id -> one Ping session (engine="ping")
 
 
 def _text_of(turns: List[Turn]) -> str:
@@ -326,6 +330,9 @@ async def assist(req: AssistRequest, request: Request):
 
 
 async def _assist(req: AssistRequest):
+    if req.engine == "ping":
+        import ping_cycle
+        return await ping_cycle.chime(req)
     t_all = time.perf_counter()
     ds = DS.get(req.dataset)
     query, q_detail, q_ms = await _build_query(req)

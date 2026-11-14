@@ -97,6 +97,8 @@ class Session:
         self.status = "idle"               # idle | running | error | done
         self.pending: Optional[dict] = None  # typed turn in flight: {"user", "reply"} while the chat model answers
         self.error: Optional[str] = None
+        self.extra_exclude: set = set()    # docs the caller forbids (e.g. the live chat's own doc)
+        self._chime_processed: List[str] = []   # user messages already run through the cycle (chime bridge)
         self._hid, self._pid = itertools.count(1), itertools.count(1)
         self.lock = asyncio.Lock()
         _SESSIONS[self.id] = self
@@ -377,7 +379,7 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         s.turns.append({"role": "assistant", "content": reply})
         reply_appended = True
 
-    own = set()
+    own = set(s.extra_exclude)         # docs the caller forbids (the live chat's own doc, etc.)
     if s.chat:
         own.add(s.chat["doc"])         # a replayed chat must not find itself
         if s.chat.get("author"):       # ...nor point the user at their own activity page
@@ -695,6 +697,72 @@ def _turn_pair(chat: dict, k: int) -> tuple:
     reply = next((t["content"] for t in chat["turns"][i + 1:end] if t["role"] == "assistant"), None)
     nxt = chat["turns"][users[k + 1]]["content"] if k + 1 < len(users) else None
     return chat["turns"][i]["content"], reply, nxt
+
+
+# ───────────────────────── chime-in bridge (Open WebUI) ─────────────────────────
+# The official Agent Hub chime-in bridge POSTs the live conversation to /api/assist with
+# engine="ping". We map each Open WebUI chat (chat_id) to a Ping session and feed its turns
+# as they arrive (the real assistant replies, like a replay), so the official tool gets the
+# full hypothesis-driven Ping — profile, L1/L2, the gate — not just one-shot retrieval.
+
+_CHIME: "OrderedDict[str, Session]" = OrderedDict()
+MAX_CHIME = 60
+
+
+def _chime_response(s: Session, sug: Optional[dict]) -> dict:
+    """Shape the latest cycle's suggestion like /api/assist, so the bridge renders it unchanged."""
+    items = []
+    if sug:
+        items.append({"doc": sug["doc"], "title": sug["title"], "why": sug.get("why") or "",
+                      "snippet": sug.get("summary") or sug.get("excerpt") or "",
+                      "kind": sug.get("kind"), "who": sug.get("who"), "strength": sug.get("strength")})
+    return {"query": s.profile.get("goal") or "", "stay_quiet": not items,
+            "reason": None if items else "ping stayed quiet", "suggestions": items,
+            "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id}
+
+
+async def chime(req) -> dict:
+    """Run the Ping cycle for a live Open WebUI chat and return an assist-shaped reply.
+    `req` is the AssistRequest (duck-typed): dataset, turns, chat_id, exclude_docs."""
+    base = DS.get(req.dataset).id.split("~")[0]
+    key = f"{base}::{req.chat_id or 'anon'}"
+    s = _CHIME.get(key)
+    if s is None:
+        s = Session(base, None, "chime")
+        _CHIME[key] = s
+        while len(_CHIME) > MAX_CHIME:
+            _CHIME.popitem(last=False)
+    s.extra_exclude |= set(req.exclude_docs or [])
+
+    # The bridge sends a (truncated) window of the conversation. Run any user message we
+    # haven't run yet, in order, each with the assistant reply that follows it (the newest
+    # user message has none yet). Match by content so a truncated window still lines up.
+    msgs = [{"role": t.role, "content": (t.content or "").strip()} for t in req.turns]
+    users = [i for i, m in enumerate(msgs) if m["role"] == "user" and m["content"]]
+    todo = []
+    for n, i in enumerate(users):
+        if msgs[i]["content"] in s._chime_processed:
+            continue
+        end = users[n + 1] if n + 1 < len(users) else len(msgs)
+        reply = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant"), None)
+        todo.append((msgs[i]["content"], reply))
+    if not todo:
+        return _chime_response(s, None)   # nothing new: don't re-fire a past suggestion
+
+    async with s.lock:
+        s.status = "running"
+        try:
+            for um, rp in todo:
+                await run_turn(s, um, rp, None, chat=False)
+                s._chime_processed.append(um)
+            s.status = "idle"
+        except Exception as e:
+            s.status, s.error = "error", f"{type(e).__name__}: {e}"[:300]
+            if s.cycles:
+                s.cycles[-1]["error"] = s.error
+            return {"query": "", "stay_quiet": True, "reason": s.error, "suggestions": [],
+                    "engine": "ping", "candidates": [], "stages": [], "retrieval": None}
+    return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None)
 
 
 # ───────────────────────── API ─────────────────────────
