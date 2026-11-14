@@ -37,6 +37,17 @@ services:
   # Point the existing Open WebUI service's chime-in bridge at the engine. On the compose
   # network, services reach each other by name, so no host.docker.internal here.
   open-webui:
+    build:
+      # Slim frontend build: copies Pyodide from node_modules and points the
+      # code-interpreter wheel URLs at the CDN for runtime fetch, instead of
+      # downloading them from cdn.jsdelivr.net at BUILD time. The full build's
+      # build-time fetch fails under Docker-in-WSL2 buildkit (the RUN step's
+      # network namespace can't resolve jsdelivr even when the host can), which
+      # aborts `npm run build` in verifyBundledWheels. Slim does zero build-time
+      # network for Pyodide, so it builds deterministically. Unrelated to chime-in;
+      # drop this block to go back to the baked-in (full) image once egress works.
+      args:
+        USE_SLIM: "true"
     environment:
       RETRIEVAL_EXPLORER_URL: http://retrieval-explorer:8000
       CHIME_DATASET: ${CHIME_DATASET:-agenthub-export-2026-11-10-latency}
