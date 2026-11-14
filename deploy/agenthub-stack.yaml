@@ -23,10 +23,13 @@ services:
       PROTOGRAPH_EMBED_HOST: ${PROTOGRAPH_EMBED_HOST:-http://10.128.241.200:11434}
       PROTOGRAPH_LLM: ${PROTOGRAPH_LLM:-gemma3:12b}
       PROTOGRAPH_JUDGE_LLM: ${PROTOGRAPH_JUDGE_LLM:-gpt-oss:20b}
+      # Ops dashboard job log (SQLite), on a named volume so it survives rebuilds
+      PROTOGRAPH_OPS_DB: /app/server/ops_data/ops.db
     volumes:
       # Corpus datasets are served from the host, not baked into the image. The image's
       # WORKDIR is /app/server, so datasets.py looks under /app/server/datasets/incoming.
       - ../retrieval-explorer/server/datasets:/app/server/datasets
+      - protograph-ops:/app/server/ops_data
     # The image bundles the React UI and the API on port 8000. Publishing it to the host
     # (default 5180) lets the browser open retrieval-explorer's doc pages / dashboard, which
     # is what CHIME_DOC_URL points at. The chime-in bridge itself uses the in-network name.
@@ -60,3 +63,6 @@ services:
       CHIME_DOC_URL: ${CHIME_DOC_URL:-}
     depends_on:
       - retrieval-explorer
+
+volumes:
+  protograph-ops:

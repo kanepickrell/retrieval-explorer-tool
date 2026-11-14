@@ -98,7 +98,12 @@ class Session:
         self.pending: Optional[dict] = None  # typed turn in flight: {"user", "reply"} while the chat model answers
         self.error: Optional[str] = None
         self.extra_exclude: set = set()    # docs the caller forbids (e.g. the live chat's own doc)
+        self.user_id: Optional[str] = None     # the Open WebUI user (chime bridge), for Ops
+        self.user_name: Optional[str] = None
+        self.chat_id: Optional[str] = None
         self._chime_processed: List[str] = []   # user messages already run through the cycle (chime bridge)
+        self._returned = 0                       # cycles whose result a chime call has handed back
+        self.chat_model: Optional[str] = None    # the model the user chats with in Open WebUI
         self._hid, self._pid = itertools.count(1), itertools.count(1)
         self.lock = asyncio.Lock()
         _SESSIONS[self.id] = self
@@ -114,7 +119,8 @@ class Session:
         tops = [c["eval"]["top_supported"] for c in self.cycles if c.get("eval", {}).get("top_supported") is not None]
         return {"id": self.id, "at": self.at, "source": self.source, "dataset": self.dataset,
                 "status": self.status, "title": (self.chat or {}).get("title") or (self.turns[0]["content"][:80] if self.turns else ""),
-                "author": (self.chat or {}).get("author"), "turn": len(self.cycles),
+                "author": (self.chat or {}).get("author") or self.user_name, "user": self.user_id,
+                "chat_id": self.chat_id, "turn": len(self.cycles),
                 "turns_total": self.user_turns_total if self.chat else None,
                 "probes_offered": len(probes), "probes_used": sum(1 for p in probes if p["used"]),
                 "top_supported": sum(tops), "top_scored": len(tops),
@@ -709,8 +715,92 @@ _CHIME: "OrderedDict[str, Session]" = OrderedDict()
 MAX_CHIME = 60
 
 
-def _chime_response(s: Session, sug: Optional[dict]) -> dict:
-    """Shape the latest cycle's suggestion like /api/assist, so the bridge renders it unchanged."""
+NEAR_MARGIN = 0.15             # within this of the gate, Ping is "close": the UI starts to glow
+
+
+def _top_conf(snapshot: Optional[list]) -> float:
+    live = [x["conf"] for x in (snapshot or []) if x.get("status") == "active"]
+    return round(max(live), 3) if live else 0.0
+
+
+# Gate criteria a user turn can still satisfy (confidence climbs, a follow-up confirms it).
+# The others (L1 held up, about work, not a repeat, not a dead end) block delivery outright,
+# so while one of them fails Ping is NOT "near" however confident it is.
+_SOFT = ("confidence", "confirmed by the user")
+_WAIT = {"confidence": "a bit more confidence", "confirmed by the user": "you to confirm it (a follow-up or a yes)"}
+
+
+def _gate_view(s: Session) -> dict:
+    """The newest cycle's gate, from the hypothesis it judged: which criteria still fail."""
+    gate = ((s.cycles[-1].get("stages") or {}).get("gate") or {}) if s.cycles else {}
+    data = gate.get("data") or {}
+    failed = [x["name"] for x in data.get("criteria") or [] if not x.get("ok")]
+    soft = [f for f in failed if f.startswith(_SOFT)]
+    hard = [f for f in failed if not f.startswith(_SOFT)]
+    return {"open": bool(data.get("open")), "failed": failed, "soft": soft, "hard": hard,
+            "hypothesis": data.get("hypothesis")}
+
+
+def _mood(s: Session, delivered: bool, n_new: int) -> dict:
+    """How Ping feels about this chat, for the bridge's animation and the Ops page:
+    confidence of the best live hypothesis vs the gate, and how it moved over this call.
+      cold      no live hypothesis worth mentioning
+      warming   confidence rose but is still well below the gate
+      near      within NEAR_MARGIN of the gate (the composer glows)
+      delivered the gate opened and Ping suggested something (full animation)
+      cooling   confidence dropped (a contradiction, a rejected check)
+      steady    no real change"""
+    conf = _top_conf(s.cycles[-1].get("snapshot")) if s.cycles else 0.0
+    before = s.cycles[-1 - n_new].get("snapshot") if len(s.cycles) > n_new else None
+    prev = _top_conf(before) if before is not None else 0.0
+    delta = round(conf - prev, 3)
+    g = _gate_view(s)
+    within = conf >= GATE_CONF - NEAR_MARGIN
+    # near = close on confidence AND nothing but soft criteria stand in the way; a gate that
+    # opened yet surfaced nothing is a dead end, not "almost"
+    near = within and not g["hard"] and not g["open"]
+    waiting = [next(v for k, v in _WAIT.items() if f.startswith(k)) for f in g["soft"]] if near else []
+    blocked = g["hard"] if within and not delivered else []
+    if delivered:
+        state = "delivered"
+    elif near:
+        state = "near"
+    elif delta <= -0.05:
+        state = "cooling"
+    elif delta >= 0.05:
+        state = "warming"
+    elif conf < 0.2:
+        state = "cold"
+    else:
+        state = "steady"
+    return {"state": state, "confidence": conf, "delta": delta, "gate": GATE_CONF, "near": GATE_CONF - NEAR_MARGIN,
+            "hypotheses": len(_live(s)),
+            "waiting": waiting,     # near: what would open the gate ("you to confirm it", ...)
+            "blocked": blocked}     # confident but held back by a hard criterion (Ops shows it)
+
+
+def _ops_cycle(s: Session, n_new: int) -> Optional[dict]:
+    """The newest cycle, compacted for the Ops job log (stripped from the bridge's reply)."""
+    if not s.cycles or not n_new:
+        return None
+    c = s.cycles[-1]
+    gate = (c.get("stages") or {}).get("gate") or {}
+    crit = (gate.get("data") or {}).get("criteria") or []
+    failed = [x["name"] for x in crit if not x.get("ok")]
+    return {"order": STAGES,
+            "stages": {k: {"status": v.get("status"), "ms": v.get("ms", 0), "title": v.get("title", "")}
+                       for k, v in (c.get("stages") or {}).items()},
+            "criteria": [{"name": x["name"], "ok": bool(x.get("ok")), "value": str(x.get("value"))} for x in crit],
+            "gate_title": gate.get("title"),
+            "gate_failed": ("gate closed: " + ", ".join(failed)) if failed else None,
+            "turns_run": n_new,
+            "hypotheses": [{"id": x["id"], "kind": x["kind"], "claim": x["claim"], "conf": x["conf"]}
+                           for x in (c.get("snapshot") or []) if x.get("status") == "active"]}
+
+
+def _chime_response(s: Session, sug: Optional[dict], n_new: int = 0) -> dict:
+    """Shape the latest cycle's suggestion like /api/assist, so the bridge renders it unchanged.
+    Adds `mood` (for Ping's animation) and `cycle` (for Ops; /api/assist strips it)."""
     items = []
     if sug:
         items.append({"doc": sug["doc"], "title": sug["title"], "why": sug.get("why") or "",
@@ -718,7 +808,16 @@ def _chime_response(s: Session, sug: Optional[dict]) -> dict:
                       "kind": sug.get("kind"), "who": sug.get("who"), "strength": sug.get("strength")})
     return {"query": s.profile.get("goal") or "", "stay_quiet": not items,
             "reason": None if items else "ping stayed quiet", "suggestions": items,
-            "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id}
+            "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id,
+            "mood": _mood(s, bool(items), n_new), "cycle": _ops_cycle(s, n_new),
+            # Ping's follow-ups for this reply (stage 7): the bridge shows these as the chat's
+            # follow-up chips, so a click is the signal Ping learns from (support_probe)
+            "follow_ups": _follow_ups(s) if n_new else []}
+
+
+def _follow_ups(s: Session) -> List[str]:
+    probe = ((s.cycles[-1].get("stages") or {}).get("probe") or {}) if s.cycles else {}
+    return [p["text"] for p in (probe.get("data") or {}).get("probes") or [] if p.get("text")]
 
 
 async def chime(req) -> dict:
@@ -733,23 +832,35 @@ async def chime(req) -> dict:
         while len(_CHIME) > MAX_CHIME:
             _CHIME.popitem(last=False)
     s.extra_exclude |= set(req.exclude_docs or [])
+    s.chat_id = req.chat_id
+    s.chat_model = getattr(req, "chat_model", None) or s.chat_model
+    if getattr(req, "user_id", None):
+        s.user_id, s.user_name = req.user_id, getattr(req, "user_name", None) or req.user_id
 
     # The bridge sends a (truncated) window of the conversation. Run any user message we
     # haven't run yet, in order, each with the assistant reply that follows it (the newest
     # user message has none yet). Match by content so a truncated window still lines up.
+    # Worked out UNDER the lock: a call that arrives while an earlier one is still running
+    # (the bridge timed out and the user sent another turn) waits, then skips what it ran.
     msgs = [{"role": t.role, "content": (t.content or "").strip()} for t in req.turns]
     users = [i for i, m in enumerate(msgs) if m["role"] == "user" and m["content"]]
-    todo = []
-    for n, i in enumerate(users):
-        if msgs[i]["content"] in s._chime_processed:
-            continue
-        end = users[n + 1] if n + 1 < len(users) else len(msgs)
-        reply = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant"), None)
-        todo.append((msgs[i]["content"], reply))
-    if not todo:
-        return _chime_response(s, None)   # nothing new: don't re-fire a past suggestion
 
     async with s.lock:
+        todo = []
+        for n, i in enumerate(users):
+            if msgs[i]["content"] in s._chime_processed:
+                continue
+            end = users[n + 1] if n + 1 < len(users) else len(msgs)
+            reply = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant"), None)
+            todo.append((msgs[i]["content"], reply))
+        if not todo:
+            # Nothing new to run. If a cycle finished after its caller gave up (bridge timeout),
+            # hand it back now so its follow-ups and suggestion aren't lost; otherwise stay quiet
+            # (never re-fire a suggestion that was already delivered).
+            unreturned = len(s.cycles) - s._returned
+            if unreturned > 0:
+                return _chime_response(s, s.cycles[-1].get("suggestion"), unreturned)
+            return _chime_response(s, None)
         s.status = "running"
         try:
             for um, rp in todo:
@@ -760,9 +871,19 @@ async def chime(req) -> dict:
             s.status, s.error = "error", f"{type(e).__name__}: {e}"[:300]
             if s.cycles:
                 s.cycles[-1]["error"] = s.error
-            return {"query": "", "stay_quiet": True, "reason": s.error, "suggestions": [],
-                    "engine": "ping", "candidates": [], "stages": [], "retrieval": None}
-    return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None)
+            return {"query": "", "stay_quiet": True, "reason": s.error, "suggestions": [], "error": True,
+                    "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id,
+                    "mood": _mood(s, False, 0), "cycle": None}
+        return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None, len(todo))
+
+
+def mark_returned(session_id: Optional[str]) -> None:
+    """The caller received this session's latest result (assist() calls this only while the
+    client is still connected), so a later call with nothing new stays quiet instead of
+    handing it back again."""
+    s = _SESSIONS.get(session_id or "") or next((x for x in _CHIME.values() if x.id == session_id), None)
+    if s is not None:
+        s._returned = len(s.cycles)
 
 
 # ───────────────────────── API ─────────────────────────

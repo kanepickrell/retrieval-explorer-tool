@@ -171,6 +171,10 @@ class AssistRequest(BaseModel):
     # session-based Ping cycle keyed by chat_id). The Open WebUI chime-in bridge picks this.
     engine: str = Field("assist", pattern="^(assist|ping)$")
     chat_id: Optional[str] = None         # Open WebUI chat id -> one Ping session (engine="ping")
+    # Who is chatting (the Open WebUI user the bridge verified), for the Ops dashboard.
+    user_id: Optional[str] = None
+    user_name: Optional[str] = None
+    chat_model: Optional[str] = None      # the model the user picked in Open WebUI (Ops shows it)
 
 
 def _text_of(turns: List[Turn]) -> str:
@@ -319,13 +323,24 @@ async def _judge(req: AssistRequest, query: str, cands: List[dict]) -> List[dict
 async def assist(req: AssistRequest, request: Request):
     """Run the chime-in and log it to the Live feed (see live.py)."""
     import live
+    import ops
     ua = request.headers.get("user-agent")
+    job = ops.start(req, ua)
+    t0 = time.perf_counter()
     try:
         resp = await _assist(req)
     except Exception as e:
-        live.record(req, {}, ua, error=f"{type(e).__name__}: {e}")
+        err = f"{type(e).__name__}: {e}"
+        live.record(req, {}, ua, error=err)
+        ops.finish(job, None, (time.perf_counter() - t0) * 1000, error=err)
         raise
     live.record(req, resp, ua)
+    if resp.get("engine") == "ping" and not await request.is_disconnected():
+        import ping_cycle
+        ping_cycle.mark_returned(resp.get("session"))
+    ops.finish(job, resp, (time.perf_counter() - t0) * 1000,
+               error=resp.get("reason") if resp.get("engine") == "ping" and resp.get("error") else None)
+    resp.pop("cycle", None)       # Ops-only detail; the bridge doesn't need it
     return resp
 
 

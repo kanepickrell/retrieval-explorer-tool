@@ -524,3 +524,42 @@ export const newPingSession = (datasetId: string, chatId?: string): Promise<Ping
 export const pingNext = (id: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/next`);
 export const pingSay = (id: string, message: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/say`, { message });
 export const resetPing = () => sendJson("DELETE", "/api/ping/sessions");
+
+
+// ───────────────────────── Ops (server/ops.py) ─────────────────────────
+
+/** KPI strip over a time window. */
+export type OpsSummary = {
+  hours: number; rev: number; users: number; active_users: number; sessions: number; active_sessions: number;
+  jobs: number; running: number; suggested: number; quiet: number; errors: number;
+  chime_rate: number | null; p50_ms: number | null; p95_ms: number | null;
+};
+export type OpsUser = {
+  user: string; user_name: string; jobs: number; sessions: number; suggested: number; quiet: number;
+  errors: number; running: number; last_at: number; avg_ms: number | null; confidence: number | null;
+};
+export type OpsStage = { name: string; status: string; ms: number; title: string };
+export type OpsMood = { state: string; confidence: number; delta: number; gate: number; near: number; hypotheses?: number;
+  waiting?: string[]; blocked?: string[] };
+/** One chime-in call: a Ping cycle (engine "ping") or one assist pass. */
+export type OpsJob = {
+  id: number; rev: number; at: number; done_at: number | null;
+  status: "running" | "suggested" | "quiet" | "error" | "lost";
+  user: string; user_name: string; chat_id: string | null; session_id: string | null;
+  source: string; engine: string; dataset: string | null; chat_model: string | null; message: string; reason: string | null;
+  confidence: number | null; delta: number | null; gate: number | null; total_ms: number | null;
+  detail: {
+    stages: OpsStage[]; criteria: { name: string; ok: boolean; value: string }[]; gate_title: string | null;
+    turns_run: number | null; hypotheses: { id: string; kind: string; claim: string; conf: number }[];
+    suggestions: { doc: string; title: string; why: string; kind?: string }[]; query: string | null; mood: OpsMood | Record<string, never>;
+    follow_ups?: string[]; engine_models?: { llm?: string; judge?: string; embed?: string };
+  } | null;
+};
+export type LlmTask = { kind: string; model: string; task: string; calls: number; failed: number; empty: number;
+  reloads: number; p50_ms: number | null; p95_ms: number | null; tokens_per_s: number | null };
+
+export const getOpsSummary = (hours: number): Promise<OpsSummary> => getJson("/api/ops/summary", { hours });
+export const listOpsUsers = (hours: number): Promise<OpsUser[]> => getJson("/api/ops/users", { hours });
+export const listOpsJobs = (hours: number, after = 0, user?: string): Promise<{ rev: number; jobs: OpsJob[] }> =>
+  getJson("/api/ops/jobs", { hours, after, user, limit: 80 });
+export const getLlmStats = (): Promise<{ tasks: LlmTask[] }> => getJson("/api/llm/stats", { last: 0 });

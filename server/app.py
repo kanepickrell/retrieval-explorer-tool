@@ -49,6 +49,8 @@ from agent_loop import router as agent_router  # noqa: E402
 app.include_router(agent_router)  # /api/agent (routing agent: runs + live events)
 from ping_cycle import router as ping_router  # noqa: E402
 app.include_router(ping_router)  # /api/ping (Ping cycle: profile, probes, gate, per-turn stages)
+from ops import router as ops_router  # noqa: E402
+app.include_router(ops_router)  # /api/ops (persistent chime-in jobs for the Ops dashboard)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 
