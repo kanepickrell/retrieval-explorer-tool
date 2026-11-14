@@ -1,0 +1,48 @@
+# Compose OVERRIDE that adds retrieval-explorer (the retrieval engine) to the Agent Hub /
+# Open WebUI stack and points Open WebUI's chime-in at it.
+#
+# Launch from the agenthub-chime-in repo, with this file as a second -f:
+#
+#   cd ../agenthub-chime-in
+#   docker compose -f docker-compose.yaml -f ../retrieval-explorer/deploy/agenthub-stack.yaml up
+#
+# IMPORTANT path note: Docker Compose resolves relative paths against the FIRST -f file's
+# directory (the agenthub-chime-in repo), so the paths below are written relative to THAT,
+# not to this file. It assumes the two repos are siblings:
+#   …/agenthub-chime-in     (the stack)
+#   …/retrieval-explorer    (this repo)
+#
+# Set CHIME_DATASET / PROTOGRAPH_* in agenthub-chime-in/.env (see retrieval-explorer.env.example).
+services:
+  retrieval-explorer:
+    build:
+      context: ../retrieval-explorer      # relative to the agenthub-chime-in project dir
+      dockerfile: Dockerfile
+    environment:
+      # Ollama is a separate remote GPU host, NOT host.docker.internal.
+      PROTOGRAPH_EMBED_HOST: ${PROTOGRAPH_EMBED_HOST:-http://10.128.241.200:11434}
+      PROTOGRAPH_LLM: ${PROTOGRAPH_LLM:-gemma3:12b}
+      PROTOGRAPH_JUDGE_LLM: ${PROTOGRAPH_JUDGE_LLM:-gpt-oss:20b}
+    volumes:
+      # Corpus datasets are served from the host, not baked into the image. The image's
+      # WORKDIR is /app/server, so datasets.py looks under /app/server/datasets/incoming.
+      - ../retrieval-explorer/server/datasets:/app/server/datasets
+    # The image bundles the React UI and the API on port 8000. Publishing it to the host
+    # (default 5180) lets the browser open retrieval-explorer's doc pages / dashboard, which
+    # is what CHIME_DOC_URL points at. The chime-in bridge itself uses the in-network name.
+    ports:
+      - "${RETRIEVAL_EXPLORER_PORT:-5180}:8000"
+    restart: unless-stopped
+
+  # Point the existing Open WebUI service's chime-in bridge at the engine. On the compose
+  # network, services reach each other by name, so no host.docker.internal here.
+  open-webui:
+    environment:
+      RETRIEVAL_EXPLORER_URL: http://retrieval-explorer:8000
+      CHIME_DATASET: ${CHIME_DATASET:-agenthub-export-2026-11-10-latency}
+      CHIME_TECHNIQUE: ${CHIME_TECHNIQUE:-bm25_vector}
+      # Doc links open retrieval-explorer's doc page (served on the host). Empty -> the
+      # bridge falls back to a generated markdown brief, so links work without the frontend.
+      CHIME_DOC_URL: ${CHIME_DOC_URL:-}
+    depends_on:
+      - retrieval-explorer
