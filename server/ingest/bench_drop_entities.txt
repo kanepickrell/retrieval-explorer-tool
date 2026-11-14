@@ -1,0 +1,15 @@
+# Entities removed after every build (case-insensitive exact names; a trailing * matches a prefix).
+# The extraction prompt already asks the model not to create these; this catches the ones it still does.
+User
+Assistant
+Pi
+Bench Assistant
+Bench Conversation
+Bench Note
+Bench Session Day
+Bench Project Settings
+Bench Issue
+Bench Measurements
+Tool:*
+/home/*
+~/*

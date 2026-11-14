@@ -42,10 +42,16 @@ async def unified_search(
     force_strategy: Optional[str] = Query(
         None, description="vector | bm25 | bm25_vector | agent"),
     dataset: Optional[str] = Query(None, description="dataset id from GET /datasets"),
+    include_text: bool = Query(False, description="add each result's chunk text as `text` (for agents "
+                                                  "that answer from it, e.g. the bench's memory_search)"),
 ):
     """Retrieve under one strategy and store the result as a run. Returns run_id:
     /answer and /metrics take it, so they work on exactly this retrieval."""
-    return await run_unified(q, limit, force_strategy, dataset)
+    out = await run_unified(q, limit, force_strategy, dataset)
+    if include_text:
+        run = _get_run(out["run_id"])
+        out["results"] = [{**r, "text": c} for r, c in zip(out["results"], run.contexts)]
+    return out
 
 
 _META_GRAPHS: dict = {}   # graphml path -> (mtime, nx graph)

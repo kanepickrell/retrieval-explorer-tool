@@ -1,0 +1,19 @@
+Classify each entity using one of the following types. If no type fits, use `Other`.
+
+- Component: electronic parts and chips, by part number or kind (AMS1117, ESP32-S3, 10k resistor R4, electrolytic capacitor)
+- Board: development boards, PCBs and modules (Raspberry Pi 5, Arduino Mega 2560, Pi Zero W, the sensor board)
+- Project: a named bench build or project (Sensor Board, General, pico-test)
+- Signal: power rails, nets, pins and buses (3V3 rail, EN pin, GPIO 17, I2C, UART at 115200 baud)
+- Issue: a problem, symptom, hypothesis or fix being worked on (LED stays off after boot, EN pin floating)
+- Measurement: a measured value with its unit and net (3V3 rail = 3.28 V)
+- Instrument: bench equipment (multimeter, oscilloscope, bench supply, RTL-SDR, camera)
+- Software: firmware, programs, libraries, models and services (Arduino IDE, Whisper, LightRAG, firmware blink sketch)
+- Document: datasheets, schematics, notes, web pages and pages within them (ESP32-S3 datasheet page 86)
+- Person: people, by name or pseudonym
+- Place: physical places and storage (cabinet 2, work box 1, the bench, a website by name)
+- Concept: an idea, technique or decision discussed (deep sleep, strapping pins, voltage regulation)
+
+Do NOT extract as entities: the conversation's speakers ("User", "Assistant", "pi", "the bench assistant"),
+on-screen windows or UI actions (minimize, scroll, a dialog box), file system paths and directories, document
+type labels ("Bench conversation", "Bench note", "Bench session day", "Bench project settings"), tool call names,
+dates and times on their own, or generic words (it, thing, this).

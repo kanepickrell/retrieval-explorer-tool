@@ -48,7 +48,9 @@ MAX_OVERLAP = 0.6
 DEICTIC = re.compile(
     r"\b(this|these|that|the above|the provided|the given|the same)\s+"
     r"(scenario|system|conversation|chat|code|file|files|problem|issue|document|documents|setup|"
-    r"project|implementation|script|class|approach|error|tool|framework|environment)\b"
+    r"project|implementation|script|class|approach|error|tool|framework|environment|session|view|"
+    r"screen|board|interaction|exchange|request|discussion)\b"
+    r"|\b(during|in) (the|this) (session|conversation|chat)\b"
     r"|^if the (problem|issue|error)\b", re.I)
 _STOP = set("""a an the and or of on in to for is are was were be been it its this that these those
 with as at by from what which who how why when where can could would should do does did i you we
@@ -87,13 +89,23 @@ def _overlap(q: str, ref: str) -> float:
 
 def _json_array(text: str) -> list:
     m = re.search(r"\[.*\]", text or "", re.S)
-    if not m:
-        return []
-    try:
-        v = json.loads(m.group(0))
-        return v if isinstance(v, list) else []
-    except Exception:
-        return []
+    if m:
+        try:
+            v = json.loads(m.group(0))
+            if isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+                return v       # a stray "[]" or "[[wikilink]]" in the reply is not the answer
+        except Exception:
+            pass
+    # some models (qwen3.x) return the objects one after another instead of an array
+    out, dec, s, i = [], json.JSONDecoder(), text or "", 0
+    while (i := s.find("{", i)) >= 0:
+        try:
+            v, i = dec.raw_decode(s, i)
+            if isinstance(v, dict):
+                out.append(v)
+        except ValueError:
+            i += 1
+    return out
 
 
 async def main(export_dir: str) -> None:
@@ -103,7 +115,9 @@ async def main(export_dir: str) -> None:
     out, dropped, t0 = [], [], time.time()
     try:
         for i, e in enumerate(gold, 1):
-            chat_doc = next((g for g in e["gold_ids"] if g.startswith("chat-")), None)
+            # the source doc: a chat (Agent Hub) or any other indexed doc (bench sessions, notes)
+            chat_doc = next((g for g in e["gold_ids"] if g.startswith("chat-")), None) or \
+                next((g for g in e["gold_ids"] if (ex / "docs" / g).exists()), None)
             if not chat_doc or not (ex / "docs" / chat_doc).exists():
                 continue
             doc = (ex / "docs" / chat_doc).read_text(encoding="utf-8")

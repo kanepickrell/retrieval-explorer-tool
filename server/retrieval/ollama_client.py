@@ -9,6 +9,9 @@ Config (env), shared with vector_provider:
   PROTOGRAPH_LLM             default: gemma3:12b
   PROTOGRAPH_JUDGE_LLM       default: gpt-oss:20b  (the evidence check only; gemma3 misjudged
                              similar-symptom records as answers, gpt-oss rejected them)
+  PROTOGRAPH_LLM_THINK       thinking models (qwen3.x, gpt-oss): "false" sends think=false so
+                             extraction and answers skip the reasoning pass; unset leaves the
+                             model's default
 
 Every call sends the same num_ctx: Ollama reloads a model when a request asks for a
 different context size, so a client with another num_ctx makes the two thrash.
@@ -28,6 +31,7 @@ HOST = os.getenv("PROTOGRAPH_EMBED_HOST", "http://10.128.241.200:11434")
 EMBED = os.getenv("PROTOGRAPH_EMBED_MODEL", "nomic-embed-text")
 LLM = os.getenv("PROTOGRAPH_LLM", "gemma3:12b")
 JUDGE_LLM = os.getenv("PROTOGRAPH_JUDGE_LLM", "gpt-oss:20b")
+THINK = os.getenv("PROTOGRAPH_LLM_THINK")
 NUM_CTX = 16384
 
 _SESSION: Optional[aiohttp.ClientSession] = None
@@ -48,6 +52,8 @@ async def _ollama_llm(prompt, system_prompt=None, history_messages=None, model=N
     model = model or LLM
     body = {"model": model, "messages": msgs, "stream": False,
             "options": {"num_ctx": NUM_CTX, "temperature": 0.0}, "keep_alive": "30m"}
+    if THINK is not None:
+        body["think"] = THINK.lower() not in ("0", "false", "no", "off")
     t0, d = time.perf_counter(), {}
     try:
         async with _SESSION.post(f"{HOST}/api/chat", json=body,
