@@ -7,20 +7,24 @@
 #   docker compose -f docker-compose.yaml -f ../retrieval-explorer/deploy/agenthub-stack.yaml up
 #
 # IMPORTANT path note: Docker Compose resolves relative paths against the FIRST -f file's
-# directory (the agenthub-chime-in repo), so the paths below are written relative to THAT,
-# not to this file. It assumes the two repos are siblings:
-#   …/agenthub-chime-in     (the stack)
-#   …/retrieval-explorer    (this repo)
+# directory (the stack repo), so the paths below are written relative to THAT, not to this
+# file. By default the two repos are siblings:
+#   …/agenthub-chime-in or …/resnovae_chat   (the stack)
+#   …/retrieval-explorer                     (this repo)
+# Cloned under another name (e.g. retrieval-explorer-tool)? Set PROTOGRAPH_DIR in the
+# stack's .env to its path relative to the stack repo, e.g. PROTOGRAPH_DIR=../retrieval-explorer-tool
 #
 # Set CHIME_DATASET / PROTOGRAPH_* in agenthub-chime-in/.env (see retrieval-explorer.env.example).
 services:
   retrieval-explorer:
     build:
-      context: ../retrieval-explorer      # relative to the agenthub-chime-in project dir
+      context: ${PROTOGRAPH_DIR:-../retrieval-explorer}      # relative to the stack repo
       dockerfile: Dockerfile
     environment:
-      # Ollama is a separate remote GPU host, NOT host.docker.internal.
-      PROTOGRAPH_EMBED_HOST: ${PROTOGRAPH_EMBED_HOST:-http://10.128.241.200:11434}
+      # The Ollama the engine thinks and embeds with. Defaults to the same Ollama Open WebUI
+      # uses (OLLAMA_BASE_URL in the stack's .env); set PROTOGRAPH_EMBED_HOST to override.
+      # Needs gemma3:12b, gpt-oss:20b and nomic-embed-text pulled.
+      PROTOGRAPH_EMBED_HOST: ${PROTOGRAPH_EMBED_HOST:-${OLLAMA_BASE_URL:-http://host.docker.internal:11434}}
       PROTOGRAPH_LLM: ${PROTOGRAPH_LLM:-gemma3:12b}
       PROTOGRAPH_JUDGE_LLM: ${PROTOGRAPH_JUDGE_LLM:-gpt-oss:20b}
       # Ops dashboard job log (SQLite), on a named volume so it survives rebuilds
@@ -28,7 +32,7 @@ services:
     volumes:
       # Corpus datasets are served from the host, not baked into the image. The image's
       # WORKDIR is /app/server, so datasets.py looks under /app/server/datasets/incoming.
-      - ../retrieval-explorer/server/datasets:/app/server/datasets
+      - ${PROTOGRAPH_DIR:-../retrieval-explorer}/server/datasets:/app/server/datasets
       - protograph-ops:/app/server/ops_data
     # The image bundles the React UI and the API on port 8000. Publishing it to the host
     # (default 5180) lets the browser open retrieval-explorer's doc pages / dashboard, which
@@ -61,6 +65,10 @@ services:
       # Doc links open retrieval-explorer's doc page (served on the host). Empty -> the
       # bridge falls back to a generated markdown brief, so links work without the frontend.
       CHIME_DOC_URL: ${CHIME_DOC_URL:-}
+      # Ping writes the follow-ups shown under each reply (and learns from the one clicked),
+      # so Open WebUI's own follow-up generation is off. Applies on a fresh data volume;
+      # after that it's Admin > Settings > Interface > Follow-Up Generation.
+      ENABLE_FOLLOW_UP_GENERATION: "false"
     depends_on:
       - retrieval-explorer
 
