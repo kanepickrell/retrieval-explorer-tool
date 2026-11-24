@@ -129,8 +129,44 @@ def document_source(doc: str = Query(..., description="document id (file name), 
         raise HTTPException(404, f"'{doc}' is not in dataset '{ds.id}'")
     md = f.read_text(encoding="utf-8", errors="replace")
     from assist import doc_title
+    orig = _original_of(ds, doc)
     return {"dataset": ds.id, "doc": doc, "kind": doc.split("-", 1)[0],
-            "title": doc_title(ds, doc, md), "markdown": md}
+            "title": doc_title(ds, doc, md), "markdown": md,
+            # the uploaded file itself, when the export carries it (GET /documents/original)
+            "original": {"name": orig.name.split("_", 1)[-1], "media_type": _media_type(orig),
+                         "size": orig.stat().st_size} if orig else None}
+
+
+def _original_of(ds, doc: str):
+    """The uploaded file behind a file-<id>.md doc: <export>/uploads/<id>_<name>, or None."""
+    import re as _re
+    m = _re.fullmatch(r"file-([0-9a-fA-F-]{8,64})\.md", doc or "")
+    if not m or not ds.docs_dir:
+        return None
+    up = ds.docs_dir.parent / "uploads"
+    if not up.is_dir():
+        return None
+    hits = sorted(p for p in up.glob(f"{m.group(1)}_*") if p.is_file())
+    return hits[0] if hits else None
+
+
+def _media_type(p) -> str:
+    import mimetypes
+    return mimetypes.guess_type(p.name)[0] or "application/octet-stream"
+
+
+@app.get("/documents/original")
+def document_original(doc: str = Query(..., description="document id of an uploaded file, e.g. file-<id>.md"),
+                      dataset: str | None = Query(None)):
+    """The original uploaded file behind a file-<id>.md doc (a PDF, say), when the export
+    carries it under uploads/. 404 when only the extracted text exists."""
+    from fastapi.responses import FileResponse
+    ds = DS.get(dataset)
+    orig = _original_of(ds, doc)
+    if not orig:
+        raise HTTPException(404, "no original file for this document")
+    name = orig.name.split("_", 1)[-1]
+    return FileResponse(orig, media_type=_media_type(orig), filename=name, content_disposition_type="inline")
 
 
 @app.get("/graph")

@@ -43,6 +43,10 @@ and the real next message as ground truth for the probes and hypotheses.
   POST   /api/ping/sessions/{id}/say     {message}: the assistant replies at once; Ping's cycle runs in the background and chimes in below if it finds something
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
+  POST   /api/ping/feedback              {dataset, chat_id, doc, helpful}: the user dismissed a find
+                                         in Open WebUI; it never comes back in that chat, the
+                                         hypothesis behind it loses confidence, and the next updates
+                                         are told about it so new hypotheses steer away from it
   DELETE /api/ping/sessions              reset (also clears the agent's run list)
 """
 from __future__ import annotations
@@ -75,7 +79,8 @@ MIN_AGREE = 2                  # an unscoped hypothesis holds up only if its sea
 ECHO_SIM = 0.85                # a message this close to a follow-up counts as taking it
 SCOPE_NODES = 40
 DELTA = {"support": 0.15, "support_probe": 0.30, "contradict": -0.25, "neutral": -0.05,
-         "validated": 0.10, "weak": -0.05, "rejected": -0.30}
+         "validated": 0.10, "weak": -0.05, "rejected": -0.30,
+         "dismissed": -0.30}       # the user dismissed what this hypothesis surfaced
 KINDS = ("artifact", "insight", "idea")
 
 _SESSIONS: "OrderedDict[str, Session]" = OrderedDict()
@@ -92,7 +97,8 @@ class Session:
         self.pos = 0                       # replay: user turns consumed
         self.turns: List[dict] = []        # conversation so far
         self.profile = {"goal": "", "stage": "", "facts": {"who": "", "what": "", "why": ""},
-                        "hypotheses": [], "probes": [], "suggested": []}
+                        "hypotheses": [], "probes": [], "suggested": [],
+                        "dismissed": []}   # finds the user dismissed as not helpful
         self.cycles: List[dict] = []
         self.status = "idle"               # idle | running | error | done
         self.pending: Optional[dict] = None  # typed turn in flight: {"user", "reply"} while the chat model answers
@@ -185,6 +191,8 @@ hypotheses about what would help (id, kind, confidence, claim):
 {hyps}
 follow-up questions offered after the last reply (id [hypothesis it tests]: text):
 {probes}
+finds Ping already showed that the user DISMISSED as not helpful (title [kind, hypothesis that found it]):
+{dismissed}
 
 LATEST EXCHANGE:
 {exchange}
@@ -203,6 +211,7 @@ Rules:
 - Use the user's meaning of a word. In particular a Hub "agent" is an AI assistant, but a user talking about Caldera, C2, implants, beacons or hosts means a C2 agent (an implant on a machine). Don't turn a C2-agent problem into an Agent Hub hypothesis unless the user asks about AI agents or automation.
 - kinds: an "insight" hypothesis is about how other people handled the same problem, so it looks for past chats: answer_type "document", target "chat".
 - asked: true only when the NEW message explicitly asks for exactly this kind of help (e.g. "is anyone automating this?" for an idea hypothesis about automation); otherwise false.
+- dismissed finds: the user looked at them and said they don't help. Don't propose a new hypothesis that would lead back to the same record or the same kind of thing for the same need; look for a different kind of help, or a different angle on the need, instead.
 - scope: ONLY names the user actually wrote. facts: only what the user stated; "" otherwise."""
 
 _PROBE_PROMPT = """You write the follow-up suggestions a chat app shows under the assistant's reply. The USER clicks one and it is sent to the assistant as the user's next message.
@@ -347,6 +356,11 @@ def _hyp_lines(s: Session) -> str:
     return "\n".join(f"  {h['id']} ({h['kind']}, {h['confidence']:.2f}): {h['claim']}" for h in live) or "  (none yet)"
 
 
+def _dismissed_lines(s: Session) -> str:
+    return "\n".join(f"  {d['title']} [{d.get('kind') or '?'}, {d.get('hypothesis') or '-'}]"
+                     for d in s.profile.get("dismissed") or []) or "  (none)"
+
+
 def _probe_lines(probes: List[dict]) -> str:
     return "\n".join(f"  {p['id']} [{p['tests'] or '-'}]: {p['text']}" for p in probes) or "  (none)"
 
@@ -418,7 +432,8 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     u = await A._llm_json(_UPDATE_PROMPT.format(
         vocab=_known_records(L, s), goal=P["goal"] or "(unknown)", stage=P["stage"] or "(unknown)",
         who=P["facts"]["who"] or "?", what=P["facts"]["what"] or "?", why=P["facts"]["why"] or "?",
-        hyps=_hyp_lines(s), probes=_probe_lines(offered), exchange=exchange, hyp=_HYP),
+        hyps=_hyp_lines(s), probes=_probe_lines(offered), dismissed=_dismissed_lines(s),
+        exchange=exchange, hyp=_HYP),
         "You maintain a user profile from a conversation. Output JSON only.")
     P["goal"] = str(u.get("goal") or P["goal"]).strip()[:300]
     P["stage"] = u.get("stage") if u.get("stage") in ("chitchat", "exploring", "working", "wrapping_up") else (P["stage"] or "exploring")
@@ -898,6 +913,38 @@ class Say(BaseModel):
     message: str
 
 
+class Feedback(BaseModel):
+    dataset: Optional[str] = None
+    chat_id: Optional[str] = None
+    doc: str
+    helpful: bool = False
+
+
+def dismiss(s: Session, doc: str) -> dict:
+    """The user dismissed a find: never show it again in this chat, take confidence from the
+    hypothesis that surfaced it (it must earn its way back), and keep a note the next profile
+    updates see."""
+    # already in "suggested" (so the dive never offers it again); kept out of extra_exclude on
+    # purpose, which would also hide it from the L1 check and make other hypotheses look unsupported
+    if doc not in s.profile["suggested"]:
+        s.profile["suggested"].append(doc)
+    sug = next((c["suggestion"] for c in reversed(s.cycles)
+                if (c.get("suggestion") or {}).get("doc") == doc), None) or {}
+    turn = len(s.cycles)
+    h = next((x for x in s.profile["hypotheses"] if x["id"] == sug.get("hypothesis")), None)
+    if h and h["status"] == "active":
+        _bump(h, DELTA["dismissed"], turn, "dismissed", f"the user dismissed {sug.get('title') or doc} as not helpful")
+        h["confirmed"] = False
+        if h["confidence"] < 0.10:
+            h["status"] = "retired"
+            h["history"].append({"turn": turn, "delta": 0, "source": "retired",
+                                 "why": "dismissed below 0.10", "conf": h["confidence"]})
+    if not any(d["doc"] == doc for d in s.profile["dismissed"]):
+        s.profile["dismissed"].append({"doc": doc, "title": sug.get("title") or doc, "kind": sug.get("kind"),
+                                       "hypothesis": sug.get("hypothesis"), "turn": turn, "at": time.time()})
+    return {"ok": True, "session": s.id, "hypothesis": h and {"id": h["id"], "conf": h["confidence"], "status": h["status"]}}
+
+
 def _state(s: Session) -> dict:
     from retrieval import ollama_client as ollama
     return {**s.summary(), "error": s.error, "chat": s.chat and {k: s.chat[k] for k in ("chat_id", "doc", "title", "author")},
@@ -1007,6 +1054,19 @@ async def say(sid: str, req: Say, wait: bool = False):
     else:
         asyncio.create_task(task)
     return {"id": s.id}
+
+
+@router.post("/feedback")
+async def feedback(req: Feedback):
+    """A find's feedback from the chime bridge (Open WebUI): dismissed = not helpful."""
+    if req.helpful:
+        return {"ok": True, "ignored": "only dismissals are recorded"}
+    base = DS.get(req.dataset).id.split("~")[0]
+    s = _CHIME.get(f"{base}::{req.chat_id or 'anon'}")
+    if s is None:
+        raise HTTPException(404, "no Ping session for this chat (sessions are kept in memory and lost on restart)")
+    async with s.lock:   # not while a cycle is mid-update
+        return dismiss(s, req.doc)
 
 
 @router.get("/sessions")
