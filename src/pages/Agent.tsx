@@ -450,7 +450,7 @@ function GraphPanel({ graph, s, cycle }: { graph: { nodes: GraphNode[]; edges: G
           <span>
             graph: <span className="text-ink">turn {shown.turn}</span>
             {shown === cycle
-              ? <> · {stageNow ? `after ${STAGE[stageNow].label.toLowerCase()}` : "starting"}{f.suggestion?.length ? " · suggestion in white" : f.evidence?.length ? " · evidence in white" : ""}</>
+              ? <> · {stageNow ? `after ${STAGE[stageNow].label.toLowerCase()}` : "starting"}{f.suggestion?.length ? " · suggestion highlighted" : f.evidence?.length ? " · evidence highlighted" : ""}</>
               : <> · turn {cycle?.turn} is at {stageNow ? STAGE[stageNow].label.toLowerCase() : "observe"}; its hypotheses light up once they're checked on L1</>}
           </span>
         ) : <span>graph: no hypotheses checked yet; they light up after the first L1 check</span>}
@@ -462,7 +462,7 @@ function GraphPanel({ graph, s, cycle }: { graph: { nodes: GraphNode[]; edges: G
         </span>
         <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full" style={{ background: "var(--vector)" }} />
           <span className="text-muted">competing hypotheses ({Object.entries(f.hyps ?? {}).filter(([id, h]) => id !== f.top && h.status === "active").length})</span></span>
-        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full border border-line" style={{ background: "#f4f7fa" }} />
+        <span className="inline-flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full border border-line" style={{ background: "var(--lit)" }} />
           <span className="text-muted">read / suggested</span></span>
       </div>
       <div className="h-[520px]">

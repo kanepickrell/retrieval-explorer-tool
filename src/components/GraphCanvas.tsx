@@ -260,7 +260,7 @@ export default function GraphCanvas({ graph, signals, resultKey, highlight, onCl
 
   const nodeFill = (n: SimNode) => {
     if (signals) {
-      if (signals.context.has(n.id)) return "#f4f7fa";
+      if (signals.context.has(n.id)) return "var(--lit)";
       if (signals.entity.has(n.id)) return "var(--local)";
       if (signals.vector.has(n.id)) return "var(--vector)";
       return "#5d6b7c";
@@ -478,7 +478,7 @@ function ToolButton({ onClick, disabled, title, children }: { onClick: () => voi
 /** Before a query nodes are coloured by cluster; after one, by retrieval signal. */
 function Legend({ signals, clusters }: { signals: boolean; clusters: string[] }) {
   const items: [string, string, boolean?][] = signals
-    ? [["entity", "var(--local)"], ["relation", "var(--global)", true], ["vector", "var(--vector)"], ["in final context", "#f4f7fa"]]
+    ? [["entity", "var(--local)"], ["relation", "var(--global)", true], ["vector", "var(--vector)"], ["in final context", "var(--lit)"]]
     : clusters.map((c): [string, string] => [c, clusterColor(c)]);
   return (
     <div className="flex flex-wrap gap-x-3 gap-y-1 rounded-md border border-line bg-surface/90 px-2.5 py-1.5 font-mono text-[10px] text-muted">

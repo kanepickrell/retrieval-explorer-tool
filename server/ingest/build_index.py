@@ -32,9 +32,16 @@ trailing * matches a prefix) after every run: speaker and boilerplate entities a
 small extraction model creates anyway, which otherwise become hubs linking
 everything to everything.
 
+--chunker structured uses ingest/structured_chunker.py (structure-aware splits +
+a per-chunk context header) instead of LightRAG's fixed 500-token windows; every
+other setting stays identical, so the two indexes differ only in chunking. (Removed
+2026-11-13 for the same hit@5 as the default index; restored 2026-11-15 so the bench's
+storage-structured comparison index stays current.)
+
 Usage:
   python build_index.py <docs_dir> <storage_dir> [--max-async N] [--retry-failed] [--sync]
                         [--entity-guidance FILE] [--drop-entities FILE]
+                        [--chunker default|structured]
 """
 from __future__ import annotations
 
@@ -142,10 +149,17 @@ def _hash(p: Path) -> str:
 
 
 async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bool = False,
-               sync: bool = False, entity_guidance: str = "", drop_entities: str = "") -> None:
+               sync: bool = False, entity_guidance: str = "", drop_entities: str = "",
+               chunker: str = "default") -> None:
     docs = sorted(Path(docs_dir).glob("*.md"))
     Path(storage_dir).mkdir(parents=True, exist_ok=True)
-    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={ollama.LLM} embed={ollama.EMBED} host={ollama.HOST}", flush=True)
+    print(f"[build] {len(docs)} docs -> {storage_dir}  llm={ollama.LLM} embed={ollama.EMBED} host={ollama.HOST} "
+          f"chunker={chunker}", flush=True)
+    extra = {}
+    if chunker == "structured":
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from structured_chunker import structured_chunking
+        extra["chunking_func"] = structured_chunking
 
     ollama._SESSION = aiohttp.ClientSession()
     rag = LightRAG(
@@ -157,6 +171,7 @@ async def main(docs_dir: str, storage_dir: str, max_async: int, retry_failed: bo
         llm_model_max_async=max_async, enable_llm_cache=True,
         **({"addon_params": {"entity_types_guidance": Path(entity_guidance).read_text(encoding="utf-8").strip()}}
            if entity_guidance else {}),
+        **extra,
     )
     await rag.initialize_storages()
     failed, stale = _failed_doc_ids(storage_dir)
@@ -221,6 +236,7 @@ if __name__ == "__main__":
                     help="re-insert changed docs and delete removed ones (content hashes in doc_hashes.json)")
     ap.add_argument("--entity-guidance", default="", help="file replacing LightRAG's entity type guidance")
     ap.add_argument("--drop-entities", default="", help="file of entity names to delete after the run")
+    ap.add_argument("--chunker", choices=["default", "structured"], default="default")
     a = ap.parse_args()
     asyncio.run(main(a.docs_dir, os.path.abspath(a.storage_dir), a.max_async, a.retry_failed, a.sync,
-                     a.entity_guidance, a.drop_entities))
+                     a.entity_guidance, a.drop_entities, a.chunker))

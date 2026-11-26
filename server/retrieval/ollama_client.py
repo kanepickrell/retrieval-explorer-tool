@@ -12,6 +12,9 @@ Config (env), shared with vector_provider:
   PROTOGRAPH_LLM_THINK       thinking models (qwen3.x, gpt-oss): "false" sends think=false so
                              extraction and answers skip the reasoning pass; unset leaves the
                              model's default
+  PROTOGRAPH_NUM_CTX         default 65536: the same context Open WebUI's agents and Hermes use
+                             for qwen3.6 on the H100 (its tag defaults to 65536), so they share one
+                             loaded copy instead of reloading it on every turn
 
 Every call sends the same num_ctx: Ollama reloads a model when a request asks for a
 different context size, so a client with another num_ctx makes the two thrash.
@@ -32,7 +35,7 @@ EMBED = os.getenv("PROTOGRAPH_EMBED_MODEL", "nomic-embed-text")
 LLM = os.getenv("PROTOGRAPH_LLM", "gemma3:12b")
 JUDGE_LLM = os.getenv("PROTOGRAPH_JUDGE_LLM", "gpt-oss:20b")
 THINK = os.getenv("PROTOGRAPH_LLM_THINK")
-NUM_CTX = 16384
+NUM_CTX = int(os.getenv("PROTOGRAPH_NUM_CTX", "65536"))
 
 _SESSION: Optional[aiohttp.ClientSession] = None
 

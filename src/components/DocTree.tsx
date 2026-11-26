@@ -114,7 +114,7 @@ export default function DocTree({ datasetId, docs, onShow }: Props) {
                                 </div>
                               )}
                               {st === "loading" && <span className="flex items-center gap-1.5 font-mono text-[11px] text-muted"><Loader2 size={12} className="animate-spin" /> loading chunks…</span>}
-                              {typeof st === "string" && st !== "loading" && <span className="font-mono text-[11px] text-red-400">{st}</span>}
+                              {typeof st === "string" && st !== "loading" && <span className="font-mono text-[11px] text-bad">{st}</span>}
                               {Array.isArray(st) && st.map((c) => (
                                 <div key={c.id} className="rounded-md border border-line bg-surface-2/50 px-2.5 py-1.5">
                                   <div className="mb-1 flex items-center gap-2 font-mono text-[10px] text-muted">

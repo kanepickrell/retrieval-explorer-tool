@@ -12,8 +12,9 @@ RUN npm ci --no-audit --no-fund
 COPY index.html postcss.config.js tailwind.config.js tsconfig.json vite.config.ts ./
 COPY public ./public
 COPY src ./src
-# Same origin as the backend, so API calls are relative.
-ENV VITE_API_URL=""
+# Same origin as the backend, so API calls are relative, all under /explorer/: Open WebUI
+# proxies that path into its ProtoGraph page (the backend strips it, so :5180 still works).
+ENV VITE_API_URL="" VITE_BASE=/explorer/
 RUN npm run build
 
 FROM python:3.12-slim

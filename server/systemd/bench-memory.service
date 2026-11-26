@@ -1,0 +1,16 @@
+[Unit]
+Description=Bench memory + Ping engine (retrieval-explorer backend :8020; Pi:8010 reverse tunnel for the hub's memory_search)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Environment=BENCH_HOST=192.168.1.242
+ExecStart=/usr/bin/bash %h/repos/retrieval-explorer-tool/server/bench_memory.sh
+StandardOutput=append:%h/.local/state/bench-memory.log
+StandardError=inherit
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

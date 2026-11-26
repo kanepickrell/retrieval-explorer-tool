@@ -16,7 +16,7 @@ export default function NodeInspector({ node, degree, signals, neighbours, onPic
   const roles: [string, string][] = [];
   if (signals?.entity.has(node.id)) roles.push(["entity hit", "var(--local)"]);
   if (signals?.vector.has(node.id)) roles.push(["vector chunk", "var(--vector)"]);
-  if (signals?.context.has(node.id)) roles.push(["final context", "#f4f7fa"]);
+  if (signals?.context.has(node.id)) roles.push(["final context", "var(--lit)"]);
   return (
     <div className="absolute right-3 top-3 z-10 w-72 rounded-card border border-line bg-surface/95 shadow-xl backdrop-blur">
       <div className="flex items-start gap-2.5 p-3 pb-2">

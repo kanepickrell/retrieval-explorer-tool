@@ -1,0 +1,10 @@
+[Unit]
+Description=Index liked-video transcripts into ProtoGraph's "youtube" dataset (Ping's video_search)
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/bash %h/repos/retrieval-explorer-tool/server/ingest/youtube_refresh.sh
+StandardOutput=append:%h/.local/state/youtube-graph.log
+StandardError=inherit
+TimeoutStartSec=6h

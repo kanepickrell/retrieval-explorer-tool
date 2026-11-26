@@ -27,4 +27,6 @@ trap 'kill $TUNNEL 2>/dev/null' EXIT
 sleep 1
 kill -0 $TUNNEL 2>/dev/null || { echo "tunnel to $HOST failed (is 11435 or Pi:8010 already in use?)"; exit 1; }
 
-exec .venv/bin/python app.py
+# Not exec: the EXIT trap has to outlive the backend, or the tunnel is left
+# holding Pi:8010 and the next start fails (ExitOnForwardFailure).
+.venv/bin/python app.py

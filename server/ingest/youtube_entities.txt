@@ -1,0 +1,15 @@
+Classify each entity using one of the following types. If no type fits, use `Other`.
+
+- Person: speakers, guests and people they talk about, by name (Will Brown, Andrej Karpathy)
+- Organization: companies, labs, teams, schools, churches, groups (Prime Intellect, OpenAI, Warrior Games)
+- Video: the talk, video or episode itself, and other videos, papers or books it cites by name
+- Software: programs, libraries, models, frameworks and services (GRPO, vLLM, LightRAG, Qwen)
+- Method: a technique, algorithm, practice or recipe that is explained (reinforcement learning, reward shaping, crop rotation)
+- Concept: an idea, claim, argument or topic discussed (agentic reasoning, subsidiarity, distributism)
+- Event: a named event, competition or happening (Warrior Games 2026, a conference)
+- Place: physical places and regions
+- Thing: physical products, tools, materials, crops, animals, equipment
+
+Do NOT extract as entities: "the speaker", "the host", "the audience", "viewers", "this video" or "this talk"
+when unnamed, YouTube itself, channel boilerplate (subscribe, like, comment, sponsor), timestamps on their own,
+filler words ("um", "you know"), [Music] / [Applause] tags, or generic words (it, thing, this, people).

@@ -16,7 +16,32 @@
   --good: #5cc27a;
   --warn: #e0b341;
   --bad: #e8736b;
+  --lit: #f4f7fa;
+  --font-sans: "IBM Plex Sans", system-ui, sans-serif;
+  --font-title: "Archivo", system-ui, sans-serif;
+  --radius-card: 10px;
   color-scheme: dark;
+}
+
+/* Open WebUI's own font, served by Open WebUI at the same origin when ProtoGraph is framed in it */
+@font-face {
+  font-family: "Inter";
+  src: url("/assets/fonts/Inter-Variable.ttf");
+  font-display: swap;
+}
+
+/* Framed in Open WebUI: index.html copies its colors and font in; this is the shape to match
+   (rounder cards, black-or-white pill buttons) and darker data colors on a light page. */
+:root.in-webui { --radius-card: 12px; }
+:root[data-theme="light"] {
+  --local: #0f8a88;
+  --global: #b7791f;
+  --vector: #7656d6;
+  --lexical: #2f6fb8;
+  --good: #2f9a52;
+  --warn: #a87f0e;
+  --bad: #cf4a40;
+  color-scheme: light;
 }
 
 html, body, #root { min-height: 100%; }
@@ -24,7 +49,7 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--ink);
-  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -33,6 +58,8 @@ body {
   .caption { @apply font-mono text-[11px] uppercase tracking-[0.08em] text-muted; }
   .btn { @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-surface-2 px-2.5 py-1 text-xs text-ink hover:border-muted/60 transition-colors disabled:opacity-40; }
   .btn-primary { @apply inline-flex items-center gap-1.5 rounded-md bg-local px-4 py-2 text-sm font-medium text-bg hover:brightness-110 transition disabled:opacity-50; }
+  .in-webui .btn-primary { @apply rounded-full bg-ink text-bg hover:brightness-90; }
+  .in-webui .btn, .in-webui .input { @apply rounded-lg; }
   .input { @apply w-full rounded-md border border-line bg-bg px-3 py-2 text-sm text-ink placeholder:text-muted/70 outline-none focus:border-local/70; }
   .tabular { font-variant-numeric: tabular-nums; }
 }
@@ -53,7 +80,7 @@ body {
   100% { transform: translate(-4px, 4px); }
 }
 @media (prefers-reduced-motion: reduce) { .orb-drift { animation: none; } }
-.doc-md h1, .doc-md h2, .doc-md h3 { font-family: "Archivo", system-ui, sans-serif; font-weight: 600; margin: 1.2em 0 0.4em; }
+.doc-md h1, .doc-md h2, .doc-md h3 { font-family: var(--font-title); font-weight: 600; margin: 1.2em 0 0.4em; }
 .doc-md h2 { font-size: 1.05rem; color: var(--ink); border-bottom: 1px solid var(--line); padding-bottom: 0.2em; }
 .doc-md h3 { font-size: 0.95rem; }
 .doc-md ol { margin: 0 0 0.7em; padding-left: 1.4em; list-style: decimal; }

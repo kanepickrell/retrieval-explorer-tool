@@ -125,7 +125,7 @@ function LiveRow({ e, canOpen, onOpen }: { e: LiveEvent; canOpen: boolean; onOpe
         </div>
       )}
       {e.error ? (
-        <div className="font-mono text-[11px] text-red-400">chime-in failed: {e.error}</div>
+        <div className="font-mono text-[11px] text-bad">chime-in failed: {e.error}</div>
       ) : e.result && (
         <>
           <Chime entry={{ kind: "chime", status: "done", res: e.result }}

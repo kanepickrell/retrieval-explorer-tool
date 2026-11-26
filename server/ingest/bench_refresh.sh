@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Refresh the bench dataset: pull new pi sessions + feedback from the Pi, rebuild
+# Refresh the bench dataset: pull new pi sessions + feedback from the Pi and the bench's
+# Open WebUI chats from this desktop, rebuild
 # the docs, and sync both indexes (changed docs re-inserted, removed docs dropped).
 #
 # Data stays on this machine. The H100 is used only for inference (embeddings +
@@ -34,8 +35,14 @@ mkdir -p "$RAW"
 rsync -a --delete "$HOST:.pi/agent/sessions/" "$RAW/pi-sessions/"
 rsync -a "$HOST:bench/feedback" "$HOST:bench/order_list.md" "$RAW/"
 
-$PY ingest/bench_to_docs.py "$DS/docs" --vault "$VAULT" --sessions "$RAW/pi-sessions" \
+# the bench's Open WebUI chats (it moved there 2026-11-14): AI Bench, not archived
+OWUI_URL=${OWUI_URL:-http://localhost:3080} $PY ingest/owui_to_docs.py "$RAW/owui-chats" \
+  || echo "  (Open WebUI chats skipped: is it up, and are WEBUI_ADMIN_* in ~/repos/resnovae_chat/.env?)"
+
+$PY ingest/bench_to_docs.py "$DS/docs" --vault "$VAULT" --sessions "$RAW/pi-sessions" --owui "$RAW/owui-chats" \
   --extra "$RAW/order_list.md" "$RAW/feedback/open_issues.md"
 
 EXTRACT=(--entity-guidance ingest/bench_entities.txt --drop-entities ingest/bench_drop_entities.txt)
 $PY ingest/build_index.py "$DS/docs" "$DS/storage" --sync --max-async 8 "${EXTRACT[@]}"
+# the structure-aware comparison index (ProtoGraph's "bench · structured"), same docs and settings
+$PY ingest/build_index.py "$DS/docs" "$DS/storage-structured" --sync --max-async 8 --chunker structured "${EXTRACT[@]}"

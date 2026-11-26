@@ -40,6 +40,20 @@ app = FastAPI(title="Retrieval Explorer backend")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+# The UI is built under /explorer/ (Open WebUI serves it inside its own page through
+# that path); strip the prefix so every route answers with or without it.
+@app.middleware("http")
+async def _strip_base(request, call_next):
+    path = request.scope.get("path", "")
+    if path == "/" and os.getenv("STATIC_DIR"):  # the UI lives under /explorer/ now
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/explorer/")
+    if path == "/explorer" or path.startswith("/explorer/"):
+        request.scope["path"] = path[len("/explorer"):] or "/"
+        request.scope["root_path"] = ""
+    return await call_next(request)
+
+
 app.include_router(search_router)  # mounts /api/search/unified and friends
 from assist import router as assist_router  # noqa: E402
 app.include_router(assist_router)  # /api/assist (chime-in)

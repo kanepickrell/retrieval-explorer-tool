@@ -11,7 +11,7 @@ import Agent from "@/pages/Agent";
 export default function App() {
   return (
     <ExplorerProvider>
-      <BrowserRouter>
+      <BrowserRouter basename={String((import.meta as any).env?.BASE_URL ?? "/").replace(/\/+$/, "")}>
         <div className="mx-auto max-w-[1440px] px-4 pb-10 sm:px-6">
           <Header />
           <Routes>

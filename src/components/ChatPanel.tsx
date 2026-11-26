@@ -228,7 +228,7 @@ export function Chime({ entry, onOpen }: { entry: Exclude<Entry, { kind: "msg" }
     );
   }
   if (entry.status === "error") {
-    return <div className="pl-1 font-mono text-[11px] text-red-400">chime-in failed: {entry.error}</div>;
+    return <div className="pl-1 font-mono text-[11px] text-bad">chime-in failed: {entry.error}</div>;
   }
   const r = entry.res;
   const timing = r.stages.map((s) => `${s.label}: ${Math.round(s.ms)} ms`).join(" · ");

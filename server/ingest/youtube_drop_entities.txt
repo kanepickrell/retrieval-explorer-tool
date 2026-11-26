@@ -1,0 +1,10 @@
+# Entities removed after every build (case-insensitive exact names; a trailing * matches a prefix).
+Speaker
+The Speaker
+Host
+Audience
+Viewers
+YouTube
+YouTube Video
+Music
+Applause

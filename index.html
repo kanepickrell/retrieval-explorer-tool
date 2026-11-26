@@ -7,6 +7,53 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <script>
+      // Inside Open WebUI (/protograph frames /explorer/, same origin): take Open WebUI's theme,
+      // light or dark, its gray scale (Glance themes included), accent and font, and follow it
+      // when it changes. Run alone (localhost:5180) ProtoGraph keeps its own dark theme.
+      (() => {
+        let P;
+        try {
+          if (window.parent === window) return;
+          P = window.parent.document;
+          void P.documentElement.className;
+        } catch (e) {
+          return; // another origin
+        }
+        const root = document.documentElement;
+        const apply = () => {
+          const pr = P.documentElement, pcs = getComputedStyle(pr);
+          const g = (n) => pcs.getPropertyValue("--color-gray-" + n).trim();
+          const light = !pr.classList.contains("dark");
+          const glance = pr.classList.contains("glance-theme");
+          const bcs = P.body ? getComputedStyle(P.body) : null;
+          const t = (k) => pcs.getPropertyValue(k).trim();
+          // a Glance theme paints the app with its canvas color; Open WebUI's own themes with the body's
+          const body = bcs && bcs.backgroundColor !== "rgba(0, 0, 0, 0)" ? bcs.backgroundColor : "";
+          const v = {
+            "--bg": (glance && t("--gt-canvas")) || body || (light ? "#ffffff" : g(900)),
+            "--surface": light ? g(50) : g(850),
+            "--surface-2": light ? g(100) : g(800),
+            "--line": light ? g(200) : g(800),
+            "--ink": (glance && t("--gt-text")) || (bcs && bcs.color) || (light ? g(900) : g(100)),
+            "--muted": light ? g(500) : g(400),
+            "--lit": light ? g(900) : g(50),
+          };
+          if (glance) {
+            Object.assign(v, { "--surface": t("--gt-panel"), "--line": t("--gt-border"), "--muted": t("--gt-muted"), "--local": t("--gt-accent"), "--good": t("--gt-ok"), "--bad": t("--gt-bad"), "--warn": t("--gt-warn") });
+          }
+          const font = bcs && bcs.fontFamily;
+          if (font) v["--font-sans"] = v["--font-title"] = font;
+          for (const k of ["--local", "--good", "--bad", "--warn", "--font-sans", "--font-title"]) root.style.removeProperty(k);
+          for (const [k, val] of Object.entries(v)) if (val) root.style.setProperty(k, val);
+          root.dataset.theme = light ? "light" : "dark";
+          root.classList.add("in-webui");
+        };
+        apply();
+        new MutationObserver(apply).observe(P.documentElement, { attributes: true, attributeFilter: ["class", "style", "data-glance-theme"] });
+        window.addEventListener("load", apply); // the parent's styles may finish after ours
+      })();
+    </script>
     <title>ProtoGraph · Retrieval Explorer</title>
   </head>
   <body>

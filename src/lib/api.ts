@@ -74,7 +74,11 @@ export class ApiError extends Error {
   constructor(message: string, readonly status?: number) { super(message); }
 }
 
-const API_BASE = ((import.meta as any).env?.VITE_API_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+// VITE_API_URL="" (the Docker build) means same origin, under the app's base path
+// (e.g. /explorer when Open WebUI serves it inside its own page).
+const _ENV = (import.meta as any).env ?? {};
+const API_BASE = (_ENV.VITE_API_URL === "" ? String(_ENV.BASE_URL ?? "/") : (_ENV.VITE_API_URL ?? "http://localhost:8000"))
+  .replace(/\/+$/, "");
 
 async function getJson(path: string, params: Record<string, string | number | undefined> = {}): Promise<any> {
   const qs = Object.entries(params)

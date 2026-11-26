@@ -80,7 +80,7 @@ function ErrorBanner() {
   if (!error) return null;
   return (
     <div role="alert" className="flex w-full items-center gap-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-ink">
-      <span className="font-mono text-xs text-red-400">backend error</span>
+      <span className="font-mono text-xs text-bad">backend error</span>
       <span className="min-w-0 flex-1 truncate">{error}</span>
       <button className="btn" onClick={() => { reportError(null); refreshDatasets(); }}>retry</button>
     </div>
@@ -93,7 +93,7 @@ export default function Header() {
   return (
     <header className="flex flex-wrap items-center gap-x-5 gap-y-3 border-b border-line py-4">
       <div className="mr-auto flex items-center gap-3">
-        <img src="/cactus.png" alt="ProtoGraph" className="h-9 w-9 object-contain" />
+        <img src={`${(import.meta as any).env?.BASE_URL ?? "/"}cactus.png`} alt="ProtoGraph" className="h-9 w-9 object-contain" />
         <div>
           <div className="caption">ProtoGraph · Retrieval Explorer</div>
           <h1 className="font-title text-xl font-bold leading-tight tracking-tight">Retrieval Explorer</h1>

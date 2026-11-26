@@ -186,7 +186,7 @@ export default function Compare() {
                   : `${evaluatedCount}/${TECHNIQUES.length} techniques evaluated.`}
               </span>
               {Object.entries(evalNotes).map(([t, n]) => (
-                <span key={t} className="w-full font-mono text-[11px] text-red-400">{t}: {n}</span>
+                <span key={t} className="w-full font-mono text-[11px] text-bad">{t}: {n}</span>
               ))}
             </section>
           )}

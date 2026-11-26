@@ -36,7 +36,7 @@ export default function Doc() {
         <ArrowLeft size={12} /> Live chime-ins
       </Link>
       {!doc && <div className="card text-sm text-muted">No document given.</div>}
-      {err && <div className="card text-sm text-red-400">Couldn't load {doc}: {err}</div>}
+      {err && <div className="card text-sm text-bad">Couldn't load {doc}: {err}</div>}
       {!src && !err && doc && <div className="card text-sm text-muted">Loading {doc}…</div>}
       {src && (
         <article className="card">

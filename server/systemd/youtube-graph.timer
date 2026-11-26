@@ -1,0 +1,10 @@
+[Unit]
+Description=Index new liked-video transcripts every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

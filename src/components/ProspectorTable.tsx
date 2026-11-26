@@ -35,7 +35,7 @@ export default function ProspectorTable({ datasets, activeId, onSelect }: Props)
                 <td className="px-3 py-2.5 text-right font-mono text-xs tabular">{d.rows.toLocaleString()}</td>
                 <td className="px-3 py-2.5 font-mono text-xs text-muted">
                   {d.status === "ready" ? "ready" : `${d.status} ${d.rows}/${d.expectedRows}`}
-                  {d.failedRows > 0 && <span className="ml-1 text-red-400">· {d.failedRows} failed</span>}
+                  {d.failedRows > 0 && <span className="ml-1 text-bad">· {d.failedRows} failed</span>}
                   {d.duplicateRows > 0 && <span className="ml-1" title="identical content already indexed under another id">· {d.duplicateRows} duplicates</span>}
                 </td>
                 <td className="px-3 py-2.5 font-mono text-xs text-muted">{d.updated ?? "—"}</td>
