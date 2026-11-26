@@ -347,10 +347,22 @@ async def assist(req: AssistRequest, request: Request):
     return resp
 
 
+def _has_metadata_graph(dataset_id: Optional[str]) -> bool:
+    base = DS.get(dataset_id).id.split("~")[0]
+    return DS.get(f"{base}~metadata").id == f"{base}~metadata"
+
+
 async def _assist(req: AssistRequest):
     if req.engine == "ping":
-        import ping_cycle
-        return await ping_cycle.chime(req)
+        if _has_metadata_graph(req.dataset):
+            import ping_cycle
+            return await ping_cycle.chime(req)
+        # No metadata graph (bench, youtube: notes and transcripts, not an Open WebUI export),
+        # so the Ping cycle can't run: fall back to the classic pipeline, once per turn. The
+        # early half stays quiet; the late half (reply finished) or a phase-less call runs it.
+        if req.phase == "early":
+            return {"query": None, "stay_quiet": True, "suggestions": [], "stages": [], "retrieval": None,
+                    "reason": "no metadata graph: classic chime-in runs when the reply finishes"}
     t_all = time.perf_counter()
     ds = DS.get(req.dataset)
     query, q_detail, q_ms = await _build_query(req)
