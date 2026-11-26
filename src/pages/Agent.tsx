@@ -7,8 +7,8 @@ import {
   Pause, Play, Send, ShieldCheck, SkipForward, Sparkles, Trash2, UserRoundPen, XCircle,
 } from "lucide-react";
 import {
-  getGraph, getPingSession, listPingChats, listPingSessions, newPingSession, pingNext, pingSay, resetPing,
-  PING_STAGES, type GraphEdge, type GraphNode, type PingChat, type PingCycle, type PingHypothesis,
+  getGraph, getPingSession, listPingSessions, newPingSession, pingNext, pingSay, resetPing,
+  PING_STAGES, type GraphEdge, type GraphNode, type PingCycle, type PingHypothesis,
   type PingSession, type PingSessionSummary, type PingStageName,
 } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
@@ -132,7 +132,7 @@ export default function Agent() {
       <div className="flex flex-wrap items-center gap-3">
         <Bot size={18} className="text-good" />
         <h2 className="font-title text-lg font-semibold">Ping cycle</h2>
-        <span className="font-mono text-[11px] text-muted">real data: {base || "no export with a metadata graph"} · replays real chats, real replies, real next messages</span>
+        <span className="font-mono text-[11px] text-muted">real data: {base || "no export with a metadata graph"} · type messages and watch Ping's cycle</span>
         <button className="btn ml-auto h-8" onClick={reset} title="Clear every session and agent run: a clean dashboard">
           <Trash2 size={12} /> Reset dashboard
         </button>
@@ -160,9 +160,8 @@ export default function Agent() {
         <div className="min-w-0 space-y-4">
           {!s ? (
             <div className="card text-sm text-muted">
-              <b>Type a message</b> to chat with the assistant while Ping listens (click its follow-ups to answer), or
-              pick a real chat and press <b>Start</b> to replay it turn by turn. Each turn runs the full cycle; the
-              rail, graph, profile and stage cards here show what happened at each stage.
+              <b>Type a message</b> to chat with the assistant while Ping listens (click its follow-ups to answer).
+              Each turn runs the full cycle; the rail, graph, profile and stage cards here show what happened at each stage.
             </div>
           ) : (
             <>
@@ -226,17 +225,14 @@ function StageRail({ cycle, running }: { cycle: PingCycle | null; running: boole
 // ───────────────────────── left column ─────────────────────────
 
 function StartCard({ base, onStarted }: { base: string; onStarted: (id: string) => void }) {
-  const [chats, setChats] = useState<PingChat[]>([]);
-  const [chatId, setChatId] = useState("");
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => { if (base) listPingChats(base).then(setChats).catch((e) => setErr(String(e.message ?? e))); }, [base]);
-  const start = async (withMsg?: string) => {
+  const start = async (withMsg: string) => {
     setBusy(true); setErr(null);
     try {
-      const s = await newPingSession(base, withMsg ? undefined : chatId);
-      if (withMsg) await pingSay(s.id, withMsg);
+      const s = await newPingSession(base);
+      await pingSay(s.id, withMsg);
       onStarted(s.id);
       setMsg("");
     } catch (e: any) { setErr(String(e?.message ?? e)); }
@@ -244,21 +240,13 @@ function StartCard({ base, onStarted }: { base: string; onStarted: (id: string) 
   };
   return (
     <section className="card space-y-2.5">
-      <h3 className="caption">Replay a real chat</h3>
-      <select value={chatId} onChange={(e) => setChatId(e.target.value)} className="w-full rounded-md border border-line bg-bg px-2 py-1.5 text-sm">
-        <option value="">{chats.length ? `pick one of ${chats.length} real chats…` : "loading chats…"}</option>
-        {chats.map((c) => <option key={c.chat_id} value={c.chat_id}>{c.title} · {c.user_turns} turns{c.author ? ` · ${c.author}` : ""}</option>)}
-      </select>
-      <button className="btn-primary" disabled={!chatId || busy} onClick={() => start()}>
-        {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start
-      </button>
-      <div className="border-t border-line pt-2.5">
-        <h3 className="caption mb-1.5">Or type a message</h3>
-        <div className="flex gap-2">
-          <input value={msg} onChange={(e) => setMsg(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && msg.trim()) start(msg.trim()); }}
-            placeholder="starts a new session" className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-muted/60" />
-          <button className="btn" disabled={!msg.trim() || busy} onClick={() => start(msg.trim())}><Send size={12} /></button>
-        </div>
+      <h3 className="caption">Start a conversation</h3>
+      <div className="flex gap-2">
+        <input value={msg} onChange={(e) => setMsg(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && msg.trim() && !busy) start(msg.trim()); }}
+          placeholder="type a message to begin a new session" className="min-w-0 flex-1 rounded-md border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-muted/60" />
+        <button className="btn" disabled={!msg.trim() || busy} onClick={() => start(msg.trim())}>
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Send size={12} />}
+        </button>
       </div>
       {err && <div className="font-mono text-[11px] text-bad">{err}</div>}
     </section>
@@ -317,8 +305,12 @@ function ConversationCard({ s, cycle, onPick, onNext, onPlay, onStop, playing, o
               {c.reply && <Reply text={c.reply} label={live ? `assistant · ${s.chat_model}` : "assistant (real reply)"} full={live} />}
               {live && !c.reply && running && c.turn === s.cycles.length && (
                 <div className="flex items-center gap-2 px-1 text-xs text-muted">
-                  <Loader2 size={12} className="animate-spin" />
-                  {c.stages.suggest?.status === "pending" ? "Ping is checking first…" : "assistant is typing (with Ping's find)…"}
+                  <Loader2 size={12} className="animate-spin" /> assistant is typing…
+                </div>
+              )}
+              {live && c.reply && !c.suggestion && running && c.turn === s.cycles.length && (
+                <div className="flex items-center gap-1.5 px-1 text-[11px] text-muted/70" title="Ping is running its cycle in the background; it chimes in only if it finds something">
+                  <Loader2 size={11} className="animate-spin" /> Ping is looking…
                 </div>
               )}
               {c.suggestion && (

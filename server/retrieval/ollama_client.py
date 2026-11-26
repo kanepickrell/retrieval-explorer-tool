@@ -16,8 +16,12 @@ Config (env), shared with vector_provider:
                              for qwen3.6 on the H100 (its tag defaults to 65536), so they share one
                              loaded copy instead of reloading it on every turn
 
-Every call sends the same num_ctx: Ollama reloads a model when a request asks for a
-different context size, so a client with another num_ctx makes the two thrash.
+Every call to a model sends the same num_ctx: Ollama reloads a model when a request asks
+for a different context size, so two clients with different num_ctx make it thrash (each
+reload of gpt-oss:20b costs ~20 s). The judge model is shared with Open WebUI, which sends
+no num_ctx and so gets the Ollama server's default; the judge calls send none either
+(PROTOGRAPH_JUDGE_NUM_CTX overrides, e.g. to match a num_ctx set on the model in Open WebUI).
+Models only this engine uses (gemma3) keep NUM_CTX.
 """
 from __future__ import annotations
 
@@ -36,6 +40,9 @@ LLM = os.getenv("PROTOGRAPH_LLM", "gemma3:12b")
 JUDGE_LLM = os.getenv("PROTOGRAPH_JUDGE_LLM", "gpt-oss:20b")
 THINK = os.getenv("PROTOGRAPH_LLM_THINK")
 NUM_CTX = int(os.getenv("PROTOGRAPH_NUM_CTX", "65536"))
+_JUDGE_CTX = os.getenv("PROTOGRAPH_JUDGE_NUM_CTX", "").strip()
+# per-model num_ctx; None = send none (the server's default, what Open WebUI gets)
+CTX_FOR = {JUDGE_LLM: int(_JUDGE_CTX) if _JUDGE_CTX.isdigit() else None}
 
 _SESSION: Optional[aiohttp.ClientSession] = None
 
@@ -53,8 +60,9 @@ async def _ollama_llm(prompt, system_prompt=None, history_messages=None, model=N
     msgs += list(history_messages or [])
     msgs.append({"role": "user", "content": prompt})
     model = model or LLM
-    body = {"model": model, "messages": msgs, "stream": False,
-            "options": {"num_ctx": NUM_CTX, "temperature": 0.0}, "keep_alive": "30m"}
+    ctx = CTX_FOR.get(model, NUM_CTX)
+    opts = {"temperature": 0.0, **({"num_ctx": ctx} if ctx else {})}
+    body = {"model": model, "messages": msgs, "stream": False, "options": opts, "keep_alive": "30m"}
     if THINK is not None:
         body["think"] = THINK.lower() not in ("0", "false", "no", "off")
     t0, d = time.perf_counter(), {}

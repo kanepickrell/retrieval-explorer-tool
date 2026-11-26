@@ -1,0 +1,76 @@
+# Compose OVERRIDE that adds retrieval-explorer (the retrieval engine) to the Agent Hub /
+# Open WebUI stack and points Open WebUI's chime-in at it.
+#
+# Launch from the agenthub-chime-in repo, with this file as a second -f:
+#
+#   cd ../agenthub-chime-in
+#   docker compose -f docker-compose.yaml -f ../retrieval-explorer/deploy/agenthub-stack.yaml up
+#
+# IMPORTANT path note: Docker Compose resolves relative paths against the FIRST -f file's
+# directory (the stack repo), so the paths below are written relative to THAT, not to this
+# file. By default the two repos are siblings:
+#   …/agenthub-chime-in or …/resnovae_chat   (the stack)
+#   …/retrieval-explorer                     (this repo)
+# Cloned under another name (e.g. retrieval-explorer-tool)? Set PROTOGRAPH_DIR in the
+# stack's .env to its path relative to the stack repo, e.g. PROTOGRAPH_DIR=../retrieval-explorer-tool
+#
+# Set CHIME_DATASET / PROTOGRAPH_* in agenthub-chime-in/.env (see retrieval-explorer.env.example).
+services:
+  retrieval-explorer:
+    build:
+      context: ${PROTOGRAPH_DIR:-../retrieval-explorer}      # relative to the stack repo
+      dockerfile: Dockerfile
+    environment:
+      # The Ollama the engine thinks and embeds with. Defaults to the same Ollama Open WebUI
+      # uses (OLLAMA_BASE_URL in the stack's .env); set PROTOGRAPH_EMBED_HOST to override.
+      # Needs gemma3:12b, gpt-oss:20b and nomic-embed-text pulled.
+      PROTOGRAPH_EMBED_HOST: ${PROTOGRAPH_EMBED_HOST:-${OLLAMA_BASE_URL:-http://host.docker.internal:11434}}
+      PROTOGRAPH_LLM: ${PROTOGRAPH_LLM:-gemma3:12b}
+      PROTOGRAPH_JUDGE_LLM: ${PROTOGRAPH_JUDGE_LLM:-gpt-oss:20b}
+      # Ops dashboard job log (SQLite), on a named volume so it survives rebuilds
+      PROTOGRAPH_OPS_DB: /app/server/ops_data/ops.db
+    volumes:
+      # Corpus datasets are served from the host, not baked into the image. The image's
+      # WORKDIR is /app/server, so datasets.py looks under /app/server/datasets/incoming.
+      - ${PROTOGRAPH_DIR:-../retrieval-explorer}/server/datasets:/app/server/datasets
+      - protograph-ops:/app/server/ops_data
+    # The image bundles the React UI and the API on port 8000. Publishing it to the host
+    # (default 5180) lets the browser open retrieval-explorer's doc pages / dashboard, which
+    # is what CHIME_DOC_URL points at. The chime-in bridge itself uses the in-network name.
+    ports:
+      - "${RETRIEVAL_EXPLORER_PORT:-5180}:8000"
+    restart: unless-stopped
+
+  # Point the existing Open WebUI service's chime-in bridge at the engine. On the compose
+  # network, services reach each other by name, so no host.docker.internal here.
+  open-webui:
+    build:
+      # Slim frontend build: copies Pyodide from node_modules and points the
+      # code-interpreter wheel URLs at the CDN for runtime fetch, instead of
+      # downloading them from cdn.jsdelivr.net at BUILD time. The full build's
+      # build-time fetch fails under Docker-in-WSL2 buildkit (the RUN step's
+      # network namespace can't resolve jsdelivr even when the host can), which
+      # aborts `npm run build` in verifyBundledWheels. Slim does zero build-time
+      # network for Pyodide, so it builds deterministically. Unrelated to chime-in;
+      # drop this block to go back to the baked-in (full) image once egress works.
+      args:
+        USE_SLIM: "true"
+    environment:
+      RETRIEVAL_EXPLORER_URL: http://retrieval-explorer:8000
+      CHIME_DATASET: ${CHIME_DATASET:-agenthub-export-2026-11-25-personas}
+      CHIME_TECHNIQUE: ${CHIME_TECHNIQUE:-bm25_vector}
+      # "ping" = the full hypothesis-driven Ping cycle (profile, L1/L2, gate), keyed per chat.
+      # "assist" = the simpler one-shot rewrite -> retrieve -> score -> judge path.
+      CHIME_ENGINE: ${CHIME_ENGINE:-ping}
+      # Doc links open retrieval-explorer's doc page (served on the host). Empty -> the
+      # bridge falls back to a generated markdown brief, so links work without the frontend.
+      CHIME_DOC_URL: ${CHIME_DOC_URL:-}
+      # Ping writes the follow-ups shown under each reply (and learns from the one clicked),
+      # so Open WebUI's own follow-up generation is off. Applies on a fresh data volume;
+      # after that it's Admin > Settings > Interface > Follow-Up Generation.
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+    depends_on:
+      - retrieval-explorer
+
+volumes:
+  protograph-ops:

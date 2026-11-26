@@ -5,7 +5,7 @@ LightRAG storage and gold eval set live.
   agenthub-synthetic   the synthetic Agent Hub corpus (PROTOGRAPH_CORPUS_STORAGE)
                        + datasets/agenthub_focused.json gold
   <export folder>      every datasets/incoming/<name>/ that has a storage/ dir
-                       (built by ingest/build_index.py); gold = eval_set.json,
+                       (built by ingest/build_passages.py; older exports: build_index.py); gold = eval_set.json,
                        docs = docs/
   <export>~<variant>   each storage-<variant>/ dir in the same export: an alternative
                        index of the same docs (e.g. storage-metadata = one card per
@@ -99,7 +99,7 @@ def gold_entries(ds: Dataset) -> List[dict]:
     g = _read(ds.gold) if ds.gold and ds.gold.exists() else None
     if not isinstance(g, list):
         return []
-    for name in ("eval_set_generated.json", "eval_set_structural.json"):
+    for name in ("eval_set_generated.json", "eval_set_structural.json", "eval_set_answer_key.json"):
         f = ds.gold.parent / name
         extra = _read(f) if ds.gold.name == "eval_set.json" and f.exists() else None
         if isinstance(extra, list):
@@ -120,7 +120,8 @@ def describe(ds: Dataset) -> dict:
     failed = sum(1 for v in rows if v.get("status") == "failed" and not _is_content_dup(v))
     source_docs = len(list(ds.docs_dir.glob("*.md"))) if ds.docs_dir and ds.docs_dir.is_dir() else len(status)
     expected = source_docs - duplicates   # duplicates are indexed once, under the original
-    has_index = (ds.storage / "graph_chunk_entity_relation.graphml").exists() and (ds.storage / "vdb_chunks.json").exists()
+    # a passages-only full-text build (ingest/build_passages.py) has no graphml: the passages are the index
+    has_index = (ds.storage / "vdb_chunks.json").exists()
     if not has_index:
         state = "missing" if not status else "indexing"
     elif processed + failed < expected:
@@ -144,7 +145,9 @@ def describe(ds: Dataset) -> dict:
 
 
 def list_all() -> List[dict]:
-    return [describe(d) for d in _registry().values()]
+    # the built-in synthetic corpus lives in another repo; hide it when that storage is gone
+    # (it stays registered, as the fallback get() uses)
+    return [describe(d) for d in _registry().values() if d.id != DEFAULT_ID or d.storage.is_dir()]
 
 
 def _as_list(v) -> list:

@@ -20,9 +20,20 @@ agent or the user then reads with full context.
           has_skill   agent -> skill       (manifest skills)
           uses        agent -> tool/step   (manifest tools)
           forked_from item -> item
-          about       chat/agent/step/tool -> topic (tags)
-          lists       catalog -> item
+          (files also carry doc_type, tags.json's _doc_types, on the node and card)
+          about       chat/file -> topic (tags.json: tag_docs.py's fixed vocabulary;
+                      without it, Open WebUI's own chat tags), agent/step/tool -> topic
+          lists       catalog -> item (agents, tools, steps, files, teams)
   "produced" (chat/agent -> artifact) has no source table in the export yet.
+
+Node properties (the semantic model's classes[...].properties, measured in Prospector):
+  User     team, chats, files            Chat   title, started, last_active, user_turns
+  Team     name, members                 File   filename, format, content_type, size_bytes,
+  Agent/Step/Tool  name, slug, created_on,      uploaded_on, doc_type
+           category, version             Model  model_id    Skill / Topic  name
+  Catalog  kind, count
+Dates are YYYY-MM-DD strings; counts and sizes are integers. A property is only written
+when the export has a value for it, so coverage shows what the data really holds.
 
 Output is a LightRAG-shaped storage dir (graphml, vdb_chunks, kv stores), so
 datasets.py registers it as <export>~metadata and the vector / bm25 /
@@ -56,12 +67,15 @@ import httpx
 import networkx as nx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from export_to_docs import day, load, loose, msg_text, slug  # noqa: E402
+from export_to_docs import day, file_format, load, loose, msg_text, slug  # noqa: E402
 
 EMBED_HOST = os.getenv("PROTOGRAPH_EMBED_HOST", "http://10.128.241.200:11434")
 EMBED_MODEL = os.getenv("PROTOGRAPH_EMBED_MODEL", "nomic-embed-text")
 
 TID = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+# ATT&CK technique ids -> name / retired, extracted from attack-mcp's enterprise-attack bundle
+ATTACK = Path(os.getenv("PROTOGRAPH_ATTACK_TECHNIQUES",
+                        Path(__file__).resolve().parent.parent / "datasets" / "reference" / "attack-techniques.json"))
 CVE = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.I)
 FILE = re.compile(r"\b[\w-]+\.(?:py|ya?ml|json|ps1|psm1|sh|bat|exe|dll|csv|txt|md|xml|html|js|ts|go|rs|c|cpp|java|sql|conf|ini|log)\b")
 MAX_IDS = 30          # identifiers kept per card
@@ -100,6 +114,13 @@ class Builder:
             self.card_nodes[doc].add(nid)
         return nid
 
+    def prop(self, nid: str, **kv):
+        """Set structured properties on a node, skipping empty values (graphml has no null)."""
+        for k, v in kv.items():
+            if v is None or v == "" or nid not in self.G:
+                continue
+            self.G.nodes[nid][k] = v if isinstance(v, (int, float, bool)) else str(v)
+
     def edge(self, u: str, v: str, rel: str, desc: str = ""):
         if u == v or u not in self.G or v not in self.G:
             return
@@ -118,6 +139,13 @@ def build(export_dir: Path, out_dir: Path) -> None:
     teams = {}
     if (ex / "teams.json").exists():
         teams = {k: v for k, v in load(ex / "teams.json").items() if re.fullmatch(r"user-\d+", k)}
+    # tag_docs.py output: fixed-vocabulary tags per doc. When present it replaces Open
+    # WebUI's free-form chat tags as the Topic source (those stay on the card as text).
+    vocab_tags, doc_types = {}, {}
+    if (ex / "tags.json").exists():
+        tj = load(ex / "tags.json")
+        vocab_tags = {k: v for k, v in tj.items() if not k.startswith("_")}
+        doc_types = tj.get("_doc_types") or {}   # taxonomies.doc_types in the semantic model
     B = Builder()
 
     def user(u: str) -> str:
@@ -127,12 +155,18 @@ def build(export_dir: Path, out_dir: Path) -> None:
         nid = B.node(u, "User", f"Pseudonymous Agent Hub user {u}", doc)
         if teams.get(u):
             t = B.node(f"Team: {teams[u]}", "Team", f"The {teams[u]} team")
+            B.prop(t, name=teams[u])
+            B.prop(nid, team=teams[u])
             B.edge(nid, t, "member_of")
         return nid
 
     def topic(tag: str) -> str:
         tag = str(tag).strip().replace("_", " ").lower()
-        return B.node(f"Topic: {tag}", "Topic", f"Items tagged '{tag}'") if tag else ""
+        if not tag:
+            return ""
+        nid = B.node(f"Topic: {tag}", "Topic", f"Items tagged '{tag}'")
+        B.prop(nid, name=tag)
+        return nid
 
     # ── hub items: agents / steps / tools, latest version manifest ──
     def latest(rows, key):
@@ -162,6 +196,9 @@ def build(export_dir: Path, out_dir: Path) -> None:
                          doc if doc in doc_files else "")
             item_node[(kind, s)] = nid
             hub_cards[doc] = (kind, s, row, man, v)
+            created = day(row.get("created_at"))
+            B.prop(nid, name=name, slug=s, created_on=created if created != "unknown date" else "",
+                   category=row.get("category"), version=int(v["version"]) if str(v.get("version") or "").isdigit() else None)
 
     for doc, (kind, s, row, man, v) in hub_cards.items():
         nid = item_node[(kind, s)]
@@ -177,6 +214,7 @@ def build(export_dir: Path, out_dir: Path) -> None:
         skills = [sk for sk in (man.get("skills") or []) if isinstance(sk, dict) and sk.get("name")]
         for sk in skills:
             sid = B.node(f"Skill: {sk['name']}", "Skill", one_line(sk.get("description"), 300))
+            B.prop(sid, name=sk["name"])
             B.edge(nid, sid, "has_skill")
         tools = []
         for t in man.get("tools") or []:
@@ -252,7 +290,8 @@ def build(export_dir: Path, out_dir: Path) -> None:
         if user(u):
             B.edge(u, nid, "opened")
         meta = loose(c.get("meta")) or {}
-        tags = meta.get("tags", []) if isinstance(meta, dict) else []
+        auto_tags = meta.get("tags", []) if isinstance(meta, dict) else []
+        tags = vocab_tags.get(doc, []) if vocab_tags else auto_tags
         for tag in tags:
             B.edge(nid, topic(tag), "about")
         used = Counter(m.get("model_id") for m in turns if m.get("role") == "assistant" and m.get("model_id"))
@@ -264,7 +303,9 @@ def build(export_dir: Path, out_dir: Path) -> None:
                 if u:
                     B.edge(u, agent_slugs[mid], "installed")
             else:
-                B.edge(nid, B.node(f"Model: {mid}", "Model", f"Chat model {mid}"), "used")
+                mn = B.node(f"Model: {mid}", "Model", f"Chat model {mid}")
+                B.prop(mn, model_id=mid)
+                B.edge(nid, mn, "used")
                 models_used.append(mid)
         attached = []
         for fid, cids in file_chats.items():
@@ -274,6 +315,10 @@ def build(export_dir: Path, out_dir: Path) -> None:
                 fn = B.node(f"File: {fname} [{fid[:8]}]", "File", "", fdoc if fdoc in doc_files else "")
                 B.edge(nid, fn, "contains")
                 attached.append(fname)
+        started, last = day(c.get("created_at")), day(c.get("updated_at"))
+        B.prop(nid, title=c.get("title") or "Chat", started=started if started != "unknown date" else "",
+               last_active=last if last != "unknown date" else "",
+               user_turns=sum(1 for m in turns if m.get("role") == "user"))
         rv = reviews.get(cid) or {}
         first_req = next((msg_text(m) for m in turns if m.get("role") == "user" and msg_text(m).strip()), "")
         full = (docs / doc).read_text(encoding="utf-8")
@@ -283,6 +328,8 @@ def build(export_dir: Path, out_dir: Path) -> None:
                  + (f" ({teams[u]} team)" if teams.get(u) else "") + "."]
         if tags:
             lines.append(f"Tags: {', '.join(tags)}")
+        if vocab_tags and auto_tags:
+            lines.append(f"User tags: {', '.join(auto_tags)}")
         if rv.get("summary"):
             lines.append(f"Summary: {one_line(rv['summary'], 700)}")
         pains = loose(rv.get("pain_points")) or []
@@ -312,17 +359,31 @@ def build(export_dir: Path, out_dir: Path) -> None:
         if user(u):
             B.edge(u, nid, "uploaded")
         meta = loose(f.get("meta")) or {}
+        up = day(f.get("created_at"))
+        size = meta.get("size")
+        B.prop(nid, filename=fname, format=file_format(fname, meta.get("content_type")),
+               content_type=meta.get("content_type"), size_bytes=int(size) if str(size or "").isdigit() else None,
+               uploaded_on=up if up != "unknown date" else "")
         full = (docs / doc).read_text(encoding="utf-8")
         body = full.split("\n", 2)[-1] if full.startswith("#") else full
         in_chats = [chats[c].get("title") or c for c in file_chats.get(fid, []) if c in chats]
+        ftags = vocab_tags.get(doc) or []
+        for tag in ftags:
+            B.edge(nid, topic(tag), "about")
         lines = [f"# {fname}", "",
-                 f"Type: file ({meta.get('content_type') or 'unknown type'}, {meta.get('size') or '?'} bytes). "
+                 f"Type: file, format {file_format(fname, meta.get('content_type'))} "
+                 f"({meta.get('content_type') or 'unknown type'}, {meta.get('size') or '?'} bytes). "
                  f"Uploaded {day(f.get('created_at'))} by {u or 'unknown'}"
                  + (f" ({teams[u]} team)" if teams.get(u) else "") + "."]
         if meta.get("collection_name"):
             lines.append(f"Knowledge collection: {meta['collection_name']}")
         if in_chats:
             lines.append("Attached in chats: " + "; ".join(in_chats))
+        if ftags:
+            lines.append(f"Tags: {', '.join(ftags)}")
+        if doc_types.get(doc):
+            B.G.nodes[nid]["doc_type"] = doc_types[doc]
+            lines.append(f"Document type: {doc_types[doc].replace('-', ' ')}")
         lines.append(f"Opening text: {one_line(body, TEXT_CHARS)}")
         ids = identifiers(full)
         if ids:
@@ -350,6 +411,7 @@ def build(export_dir: Path, out_dir: Path) -> None:
         if my_chats:
             lines.append("Chats: " + "; ".join(n[len("Chat: "):].rsplit(" [", 1)[0] for n in my_chats[:25]))
         B.G.nodes[nid]["description"] = lines[2]
+        B.prop(nid, chats=len(my_chats), files=sum(1 for n in nb if B.G.nodes[n]["entity_type"] == "File"))
         B.cards[doc] = "\n".join(lines)
 
     # ── catalogs ──
@@ -359,13 +421,116 @@ def build(export_dir: Path, out_dir: Path) -> None:
             continue
         members = sorted(n for (k, _), n in item_node.items() if k == kind)
         nid = B.node(f"Catalog: {plural}", "Catalog", f"All {len(members)} Agent Hub {plural}", doc)
+        B.prop(nid, kind=plural, count=len(members))
         for m in members:
             B.edge(nid, m, "lists")
         B.cards[doc] = "\n".join([f"# Agent Hub catalog: all {plural}", "",
                                   f"Type: catalog. Agent Hub has {len(members)} {plural}.",
                                   "Members: " + "; ".join(f"{m} ({one_line(B.G.nodes[m]['description'], 90)})" for m in members)])
 
+    # every uploaded file / every team, as one card each (complete lists for counting questions)
+    T = lambda n: B.G.nodes[n]["entity_type"]
+    if "catalog-files.md" in doc_files:
+        fnodes = sorted(n for n in B.G if T(n) == "File")
+        nid = B.node("Catalog: files", "Catalog", f"All {len(fnodes)} uploaded files", "catalog-files.md")
+        B.prop(nid, kind="files", count=len(fnodes))
+        fmts = Counter(B.G.nodes[n].get("format", "unknown") for n in fnodes)
+        rows = []
+        for n in fnodes:
+            d = B.G.nodes[n]
+            up = next((m for m in B.G.neighbors(n) if T(m) == "User"), None)
+            B.edge(nid, n, "lists")
+            rows.append(f"{d.get('filename', n)} (format {d.get('format', '?')}"
+                        + (f", {d['doc_type'].replace('-', ' ')}" if d.get("doc_type") else "")
+                        + (f", {d['size_bytes']} bytes" if d.get("size_bytes") else "")
+                        + (f", uploaded by {up}" if up else "") + ")")
+        B.cards["catalog-files.md"] = "\n".join([
+            "# Uploaded files catalog: all files", "",
+            f"Type: catalog. There are {len(fnodes)} uploaded files: "
+            + ", ".join(f"{k} {f}" for f, k in fmts.most_common()) + ". Only these are files; "
+            "names mentioned inside a file's text are not separate files.",
+            "Files: " + "; ".join(rows)])
+    if "catalog-teams.md" in doc_files:
+        tnodes = sorted(n for n in B.G if T(n) == "Team")
+        nid = B.node("Catalog: teams", "Catalog", f"All {len(tnodes)} teams", "catalog-teams.md")
+        B.prop(nid, kind="teams", count=len(tnodes))
+        rows = []
+        for t in tnodes:
+            mem = sorted(m for m in B.G.neighbors(t) if T(m) == "User")
+            B.prop(t, members=len(mem))
+            B.edge(nid, t, "lists")
+            # what the team works on: topics of its members' chats and files (the works_on rule)
+            work = Counter(tp for u in mem for x in B.G.neighbors(u) if T(x) in ("Chat", "File")
+                           for tp in B.G.neighbors(x) if T(tp) == "Topic")
+            rows.append(f"{B.G.nodes[t].get('name', t)}: members {', '.join(mem)}"
+                        + (f"; works on {', '.join(w[len('Topic: '):] for w, _ in work.most_common(4))}" if work else ""))
+        no_team = sorted(n for n in B.G if T(n) == "User" and not any(T(m) == "Team" for m in B.G.neighbors(n)))
+        B.cards["catalog-teams.md"] = "\n".join([
+            "# Teams catalog: all teams", "",
+            f"Type: catalog. There are {len(tnodes)} teams: "
+            + ", ".join(B.G.nodes[t].get("name", t) for t in tnodes) + ". No other teams exist.",
+            "Teams: " + "; ".join(rows) + (f". Not on any team: {', '.join(no_team)}" if no_team else "")])
+
+    mentions(B, docs)
     write_storage(B, out_dir, ex)
+
+
+def mentions(B: "Builder", docs: Path) -> None:
+    """`mentions` edges, found deterministically in each chat's and file's full text and
+    checked before they enter the graph (schema: Chat|File -mentions-> Technique|File):
+      Technique  an ATT&CK id (T1059.001) that exists in the ATT&CK bundle; unknown ids are
+                 dropped, retired ones kept but flagged (retired=true) so answers can say so
+      File       an uploaded file's exact name (with or without its user-NN_ prefix) in a
+                 CHAT's text, unless the chat already attaches it (contains). Not file -> file:
+                 the graph is undirected, so "A mentions B" and "B mentions A" would look the same
+    No LLM: every edge is a literal match that can be shown in the text."""
+    T = lambda n: B.G.nodes[n].get("entity_type")
+    try:
+        ref = json.loads(ATTACK.read_text(encoding="utf-8"))
+        known, version = ref["techniques"], ref.get("version", "")
+    except Exception as e:
+        known, version = None, ""
+        print(f"[meta] mentions: no ATT&CK reference ({e}); technique links skipped")
+    names = {}
+    for n in B.G:
+        if T(n) == "File" and B.G.nodes[n].get("filename"):
+            fn = B.G.nodes[n]["filename"]
+            for k in {fn, re.sub(r"^user-\d+_", "", fn)}:
+                if len(k) >= 6 and "." in k:
+                    names[k.lower()] = n
+    name_rx = re.compile(r"(?<![\w.-])(" + "|".join(re.escape(k) for k in sorted(names, key=len, reverse=True))
+                         + r")(?![\w-])", re.I) if names else None
+    stats = Counter()
+    for n in [x for x in B.G if T(x) in ("Chat", "File")]:
+        doc = B.G.nodes[n].get("file_path")
+        if not doc or not (docs / doc).exists():
+            continue
+        full = (docs / doc).read_text(encoding="utf-8")
+        found = []
+        if known is not None:
+            for tid in sorted(set(TID.findall(full))):
+                t = known.get(tid)
+                if not t:
+                    stats["unknown_tid"] += 1
+                    continue
+                tn = B.node(f"Technique: {tid}", "Technique",
+                            f"ATT&CK {tid} {t['name']}" + (" (retired id)" if t["retired"] else ""))
+                B.prop(tn, technique_id=tid, name=t["name"], retired=bool(t["retired"]), attack_version=version)
+                B.edge(n, tn, "mentions", f"the text names {tid}")
+                found.append(f"{tid} {t['name']}" + (" (retired id)" if t["retired"] else ""))
+                stats["technique"] += 1
+        if name_rx and T(n) == "Chat":
+            for m in {m.group(1).lower() for m in name_rx.finditer(full)}:
+                f = names[m]
+                if f == n or (B.G.has_edge(n, f) and "contains" in B.G.edges[n, f]["keywords"].split(",")):
+                    continue
+                B.edge(n, f, "mentions", f"the text names {B.G.nodes[f]['filename']}")
+                stats["file"] += 1
+        if found and doc in B.cards:
+            B.cards[doc] += "\nATT&CK techniques named: " + "; ".join(found)
+    print(f"[meta] mentions: {stats['technique']} technique link(s) "
+          f"({sum(1 for x in B.G if T(x) == 'Technique')} techniques, ATT&CK {version or '?'}), "
+          f"{stats['file']} file link(s), {stats['unknown_tid']} unknown id(s) dropped")
 
 
 def embed(texts: list) -> list:

@@ -9,3 +9,4 @@ networkx==3.7
 pydantic==2.14.3
 lightrag-hku==1.5.7
 rank_bm25==0.2.2
+pyyaml==6.0.4

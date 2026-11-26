@@ -23,6 +23,7 @@ PLANTED.json lists them, and every planted doc's status says fast_index.
 
 Usage:
   python plant.py <export_dir> <pack>        e.g. plant.py datasets/incoming/agenthub-export-2026-11-10 range_reset_beacons
+  python plant.py <export_dir> <pack> --suffix latency   plant into <export>-latency (its own dataset)
 """
 from __future__ import annotations
 
@@ -282,9 +283,9 @@ def fast_index(storage: Path, docs_dir: Path, names: list, track: str) -> int:
 
 # ───────────────────────── main ─────────────────────────
 
-def main(src: Path, pack: str) -> None:
+def main(src: Path, pack: str, suffix: str = "planted") -> None:
     P = importlib.import_module(f"packs.{pack}")
-    dst = src.parent / f"{src.name}-planted"
+    dst = src.parent / f"{src.name}-{suffix}"
     t0 = time.time()
     copy_export(src, dst)
     ids = plant_records(dst, P)
@@ -309,5 +310,8 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("export_dir")
     ap.add_argument("pack")
+    ap.add_argument("--suffix", default="planted",
+                    help="destination is <export>-<suffix> (default: planted); use a distinct "
+                         "suffix to plant a pack into its own dataset instead of replacing the planted copy")
     a = ap.parse_args()
-    main(Path(a.export_dir).resolve(), a.pack)
+    main(Path(a.export_dir).resolve(), a.pack, a.suffix)

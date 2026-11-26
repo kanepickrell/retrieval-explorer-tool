@@ -56,7 +56,10 @@ router = APIRouter(prefix="/api/agent", tags=["Agent (routing loop)"])
 MAX_RUNS = 60          # runs kept in memory
 CONVO_TURNS = 6
 CONVO_CHARS = 4000
-DEEP = 200             # chunk rows fetched for scoped search (the export has ~700 chunks)
+DEEP = int(__import__("os").getenv("AGENT_DEEP", "200"))  # chunk rows fetched per global chunk search (AGENT_DEEP: stress-test a bigger corpus)
+# Scoped reads follow the graph's links: the scoped records' own passages are searched
+# directly (bm25_provider.search_within) instead of filtering a global search. 0 = old behaviour.
+SCOPED_READ = __import__("os").getenv("AGENT_SCOPED_READ", "1") != "0"
 SCOPE_CAP = 25         # records returned by a records answer
 CARD_OK = 0.55         # cosine of the best record card that counts as "the cards back this up"
 EVIDENCE_DOCS = 3
@@ -436,6 +439,21 @@ def _chunks(L: dict, query: str, exclude: set) -> List[dict]:
     return [r for r in rows if r["id"] not in exclude]
 
 
+def _within(L: dict, queries: List[str], scope: set, exclude: set) -> List[dict]:
+    """Passages of the scoped docs only (follow the graph's file_path links into the
+    full text), RRF over the hypothesis' query and the user's own words."""
+    sd, docs = str(L["chunk_ds"].storage), sorted(set(scope) - set(exclude))
+    key = "|".join(docs)
+    lists = [_cached("within", sd, q + "\x00" + key, lambda q=q: bp.search_within(q, docs, sd))
+             for q in dict.fromkeys(q.strip() for q in queries if q and q.strip())]
+    fused: Dict[str, dict] = {}
+    for lst in lists:
+        for rank, r in enumerate(lst, 1):
+            f = fused.setdefault(r["chunk_id"], {**r, "_rrf": 0.0})
+            f["_rrf"] += 1.0 / (60 + rank)
+    return sorted(fused.values(), key=lambda r: -r["_rrf"])
+
+
 def _content(L: dict, queries: List[str], exclude: set) -> List[dict]:
     """Chunk search for content routes: Reciprocal Rank Fusion of the hypothesis'
     query and the user's own message, so a rewrite can't lose the user's specifics."""
@@ -519,10 +537,16 @@ def _validate(L: dict, h: dict, convo: str, user_q: str, exclude: set, min_agree
         own = list(_best_chunk(_chunks(L, user_q, exclude)))[:5]
         mine = list(_best_chunk(_chunks(L, query, exclude)))[:5]
         agree = len(set(own) & set(mine))
-        ok = agree >= min_agree
-        why = (f"no named records to scope by; its query agrees with the user's own words on {agree} of the top 5 docs"
+        # Both put the SAME doc first: the strongest agreement there is, even when it is the only
+        # doc on the subject (a planted fact, a small corpus) and the rest of the top 5 is noise
+        # that cannot overlap.
+        same_top = bool(own) and bool(mine) and own[0] == mine[0]
+        ok = agree >= min_agree or same_top
+        why = (f"no named records to scope by; its query and the user's own words both rank {own[0]} first"
+               if same_top and agree < min_agree else
+               f"no named records to scope by; its query agrees with the user's own words on {agree} of the top 5 docs"
                if ok else f"drifted: only {agree} of its top 5 docs are among those the user's own words find "
-                          f"(needs {min_agree})")
+                          f"(needs {min_agree}, or the same top doc)")
     return {**out, "verdict": "validated" if ok else "weak",
             "score": round(inside / 5 + best + (0.5 if scope else 0), 3), "why": note + why}
 
@@ -557,10 +581,16 @@ def _execute(run: AgentRun, L: dict, h: dict, v: dict, user_q: str, exclude: set
     # document / detail (and soft records): chunk search, the scope's docs first, then the rest
     rows = _content(L, [query, user_q], exclude)
     if scope:
-        inside = [r for r in rows if r["id"] in scope]
+        # follow the links only for records the graph found BY NAME (a user, team, file...); a scope made
+        # of keyword matches isn't a link, so those docs only get the passages the search already ranks
+        follow = SCOPED_READ and bool(v.get("named_scope"))
+        inside = (_within(L, [query, user_q], scope, exclude) if follow
+                  else [r for r in rows if r["id"] in scope])
         if inside:
-            run.emit("search", f"Scoped search: {len(inside)} passage(s) in {len({r['id'] for r in inside})} scoped doc(s)",
-                     f"chunks for “{query}” + the user's words: inside the scope first, then the rest of the index",
+            run.emit("search", f"{'Scoped read' if follow else 'Scoped search'}: {len(inside)} passage(s) in {len({r['id'] for r in inside})} scoped doc(s)",
+                     (f"followed the graph's links into the full text of the {len(scope)} named record(s), "
+                      f"ranked for “{query}” + the user's words; then the rest of the index" if follow else
+                      f"chunks for “{query}” + the user's words: inside the scope first, then the rest of the index"),
                      layer="chunks", scoped=True, hits=len(inside))
             rows = inside + [r for r in rows if r["id"] not in scope]
         else:
@@ -570,7 +600,8 @@ def _execute(run: AgentRun, L: dict, h: dict, v: dict, user_q: str, exclude: set
         run.emit("search", f"Chunk search: {len(rows)} passages",
                  f"chunks for “{query}” + the user's words (no named records to scope by)", layer="chunks", scoped=False, hits=len(rows))
     return [{"doc": d, "score": r.get("relevance_score"), "text": r.get("content") or r.get("description") or "",
-             "chunk_id": r.get("chunk_id"), "via": "chunk"} for d, r in _best_chunk(rows).items()][:20]
+             "chunk_id": r.get("chunk_id"), "via": "chunk", "linked": r.get("via") == "within"}
+            for d, r in _best_chunk(rows).items()][:20]
 
 
 _DISTINCT = re.compile(r"[A-Za-z0-9_.\-/]*(?:_|\d|[a-z][A-Z])[A-Za-z0-9_.\-/]*|[A-Za-z]{7,}")
@@ -600,7 +631,7 @@ async def _dive_and_check(run: AgentRun, L: dict, goal: dict, h: dict, docs: Lis
     passages = _best_chunk(await asyncio.to_thread(_content, L, queries, exclude))   # cached searches
     ev = []
     for d in docs[:EVIDENCE_DOCS]:
-        p = passages.get(d["doc"])
+        p = None if d.get("linked") else passages.get(d["doc"])   # a linked doc keeps the passage read through its link
         text = (p.get("content") if p else None) or d["text"]
         ev.append({"doc": d["doc"], "title": _title(L, d["doc"]), "excerpt": _excerpt(text, queries)})
     run.emit("evidence", f"Read the top {len(ev)} doc(s)", "best passage of each, from the chunk index",

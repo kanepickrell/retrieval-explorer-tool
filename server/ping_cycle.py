@@ -23,8 +23,8 @@ Per user turn, eight stages (each recorded, so the Agent page can show them):
   5 dive L2   scoped retrieval for the top hypothesis + the evidence check
               (agent_loop._execute / _dive_and_check), limited to records the
               user's own words rank highly (OWN_TOP / PARTIAL_TOP)
-  6 suggest   one record, framed by kind (artifact / insight / idea), with the reason
-     (typed sessions: the chat model replies here, with Ping's find as background)
+  6 suggest   one record, framed by kind (artifact / insight / idea), with the reason;
+              this is Ping's chime-in, shown below the reply (which was already sent up front)
   7 probe     LLM writes the 3 follow-ups shown after the reply, in the user's voice:
               each useful on its own, and where possible leaning toward different
               open hypotheses so the pick tells them apart
@@ -40,9 +40,17 @@ and the real next message as ground truth for the probes and hypotheses.
   GET    /api/ping/chats                 replayable real chats (from /api/assist/chats)
   POST   /api/ping/sessions              {dataset, chat_id?} -> new session
   POST   /api/ping/sessions/{id}/next    replay: run the cycle on the chat's next user turn
-  POST   /api/ping/sessions/{id}/say     {message}: the cycle runs, the chat model replies with Ping's find, then the follow-ups
+  POST   /api/ping/sessions/{id}/say     {message}: the assistant replies at once; Ping's cycle runs in the background and chimes in below if it finds something
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
+  Split turns (chime bridge, phase="early" / "late"): the bridge calls once when the user
+  sends a message (stages 1-6 run while the chat model writes its reply, so a find can land
+  before the reply finishes) and again when the reply is done (probe + learn, which need it).
+  A call without a phase runs the whole turn, as before.
+  POST   /api/ping/feedback              {dataset, chat_id, doc, helpful}: the user dismissed a find
+                                         in Open WebUI; it never comes back in that chat, the
+                                         hypothesis behind it loses confidence, and the next updates
+                                         are told about it so new hypotheses steer away from it
   DELETE /api/ping/sessions              reset (also clears the agent's run list)
 """
 from __future__ import annotations
@@ -75,7 +83,8 @@ MIN_AGREE = 2                  # an unscoped hypothesis holds up only if its sea
 ECHO_SIM = 0.85                # a message this close to a follow-up counts as taking it
 SCOPE_NODES = 40
 DELTA = {"support": 0.15, "support_probe": 0.30, "contradict": -0.25, "neutral": -0.05,
-         "validated": 0.10, "weak": -0.05, "rejected": -0.30}
+         "validated": 0.10, "weak": -0.05, "rejected": -0.30,
+         "dismissed": -0.30}       # the user dismissed what this hypothesis surfaced
 KINDS = ("artifact", "insight", "idea")
 
 _SESSIONS: "OrderedDict[str, Session]" = OrderedDict()
@@ -92,11 +101,19 @@ class Session:
         self.pos = 0                       # replay: user turns consumed
         self.turns: List[dict] = []        # conversation so far
         self.profile = {"goal": "", "stage": "", "facts": {"who": "", "what": "", "why": ""},
-                        "hypotheses": [], "probes": [], "suggested": []}
+                        "hypotheses": [], "probes": [], "suggested": [],
+                        "dismissed": []}   # finds the user dismissed as not helpful
         self.cycles: List[dict] = []
         self.status = "idle"               # idle | running | error | done
         self.pending: Optional[dict] = None  # typed turn in flight: {"user", "reply"} while the chat model answers
         self.error: Optional[str] = None
+        self.extra_exclude: set = set()    # docs the caller forbids (e.g. the live chat's own doc)
+        self.user_id: Optional[str] = None     # the Open WebUI user (chime bridge), for Ops
+        self.user_name: Optional[str] = None
+        self.chat_id: Optional[str] = None
+        self._chime_processed: List[str] = []   # user messages already run through the cycle (chime bridge)
+        self._returned = 0                       # cycles whose result a chime call has handed back
+        self.chat_model: Optional[str] = None    # the model the user chats with in Open WebUI
         self._hid, self._pid = itertools.count(1), itertools.count(1)
         self.lock = asyncio.Lock()
         _SESSIONS[self.id] = self
@@ -112,7 +129,8 @@ class Session:
         tops = [c["eval"]["top_supported"] for c in self.cycles if c.get("eval", {}).get("top_supported") is not None]
         return {"id": self.id, "at": self.at, "source": self.source, "dataset": self.dataset,
                 "status": self.status, "title": (self.chat or {}).get("title") or (self.turns[0]["content"][:80] if self.turns else ""),
-                "author": (self.chat or {}).get("author"), "turn": len(self.cycles),
+                "author": (self.chat or {}).get("author") or self.user_name, "user": self.user_id,
+                "chat_id": self.chat_id, "turn": len(self.cycles),
                 "turns_total": self.user_turns_total if self.chat else None,
                 "probes_offered": len(probes), "probes_used": sum(1 for p in probes if p["used"]),
                 "top_supported": sum(tops), "top_scored": len(tops),
@@ -177,6 +195,8 @@ hypotheses about what would help (id, kind, confidence, claim):
 {hyps}
 follow-up questions offered after the last reply (id [hypothesis it tests]: text):
 {probes}
+finds Ping already showed that the user DISMISSED as not helpful (title [kind, hypothesis that found it]):
+{dismissed}
 
 LATEST EXCHANGE:
 {exchange}
@@ -195,6 +215,7 @@ Rules:
 - Use the user's meaning of a word. In particular a Hub "agent" is an AI assistant, but a user talking about Caldera, C2, implants, beacons or hosts means a C2 agent (an implant on a machine). Don't turn a C2-agent problem into an Agent Hub hypothesis unless the user asks about AI agents or automation.
 - kinds: an "insight" hypothesis is about how other people handled the same problem, so it looks for past chats: answer_type "document", target "chat".
 - asked: true only when the NEW message explicitly asks for exactly this kind of help (e.g. "is anyone automating this?" for an idea hypothesis about automation); otherwise false.
+- dismissed finds: the user looked at them and said they don't help. Don't propose a new hypothesis that would lead back to the same record or the same kind of thing for the same need; look for a different kind of help, or a different angle on the need, instead.
 - scope: ONLY names the user actually wrote. facts: only what the user stated; "" otherwise."""
 
 _PROBE_PROMPT = """You write the follow-up suggestions a chat app shows under the assistant's reply. The USER clicks one and it is sent to the assistant as the user's next message.
@@ -339,6 +360,11 @@ def _hyp_lines(s: Session) -> str:
     return "\n".join(f"  {h['id']} ({h['kind']}, {h['confidence']:.2f}): {h['claim']}" for h in live) or "  (none yet)"
 
 
+def _dismissed_lines(s: Session) -> str:
+    return "\n".join(f"  {d['title']} [{d.get('kind') or '?'}, {d.get('hypothesis') or '-'}]"
+                     for d in s.profile.get("dismissed") or []) or "  (none)"
+
+
 def _probe_lines(probes: List[dict]) -> str:
     return "\n".join(f"  {p['id']} [{p['tests'] or '-'}]: {p['text']}" for p in probes) or "  (none)"
 
@@ -351,10 +377,15 @@ def _clip(t: str, n: int) -> str:
 # ───────────────────────── the cycle ─────────────────────────
 
 async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Optional[str] = None,
-                   chat: bool = False) -> dict:
+                   chat: bool = False, early: bool = False) -> dict:
     """One full cycle for a user message. Replays pass the real reply; chat=True (a typed
-    message) has the chat model answer after Ping's suggest stage, with Ping's find in hand,
-    so the reply and the chime-in agree. The follow-ups are written after the reply."""
+    message) has the chat model answer UP FRONT (before the expensive stages), blind to the
+    cycle, so the user isn't blocked on Ping; the suggest stage then chimes in separately
+    below the reply. The follow-ups are written after the cycle.
+
+    early=True (a split turn): stop after the suggest stage; the reply is still being written.
+    finish_turn() runs probe + learn once it arrives. Stages 1-6 never read this turn's reply
+    (the update reads the PREVIOUS reply), so splitting changes nothing they decide."""
     from retrieval import vector_provider as vp
     L = A._layers(s.dataset)
     turn = len(s.cycles) + 1
@@ -364,7 +395,19 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
              "focus": {}, "eval": {}, "at": time.time()}
     s.cycles.append(cycle)
     s.pending = None   # the cycle now carries this turn (message + reply)
-    own = set()
+
+    # The assistant answers immediately, blind to Ping's cycle, so the user is never blocked on
+    # the dive + evidence check. Ping runs below and chimes in separately (the suggest stage).
+    # Earlier findings already shown stay as background for continuity. Replays keep the real reply.
+    reply_appended = False
+    if chat:
+        earlier = [c["suggestion"] for c in s.cycles[:-1] if c.get("suggestion")]
+        reply = await _chat_reply(s, user_msg, None, earlier)
+        cycle["reply"] = reply
+        s.turns.append({"role": "assistant", "content": reply})
+        reply_appended = True
+
+    own = set(s.extra_exclude)         # docs the caller forbids (the live chat's own doc, etc.)
     if s.chat:
         own.add(s.chat["doc"])         # a replayed chat must not find itself
         if s.chat.get("author"):       # ...nor point the user at their own activity page
@@ -397,7 +440,8 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
     u = await A._llm_json(_UPDATE_PROMPT.format(
         vocab=_known_records(L, s), goal=P["goal"] or "(unknown)", stage=P["stage"] or "(unknown)",
         who=P["facts"]["who"] or "?", what=P["facts"]["what"] or "?", why=P["facts"]["why"] or "?",
-        hyps=_hyp_lines(s), probes=_probe_lines(offered), exchange=exchange, hyp=_HYP),
+        hyps=_hyp_lines(s), probes=_probe_lines(offered), dismissed=_dismissed_lines(s),
+        exchange=exchange, hyp=_HYP),
         "You maintain a user profile from a conversation. Output JSON only.")
     P["goal"] = str(u.get("goal") or P["goal"]).strip()[:300]
     P["stage"] = u.get("stage") if u.get("stage") in ("chitchat", "exploring", "working", "wrapping_up") else (P["stage"] or "exploring")
@@ -613,10 +657,28 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
         else:
             h["dry"] = h["query"]
 
-    # the chat model answers now, after Ping's suggest, so it can use what Ping found
-    if chat:
-        earlier = [c["suggestion"] for c in s.cycles[:-1] if c.get("suggestion")]
-        reply = await _chat_reply(s, user_msg, cycle.get("suggestion"), earlier)
+    # (the reply was already produced up front, before this cycle ran)
+
+    _snapshot(s, cycle)     # Ping's state after the search half (mood, Ops), redone by learn
+    if early:
+        cycle["awaiting_reply"] = True
+        return cycle
+    return await finish_turn(s, cycle, reply, next_msg, reply_appended)
+
+
+def _snapshot(s: Session, cycle: dict) -> list:
+    snap = [{"id": h["id"], "kind": h["kind"], "claim": h["claim"], "conf": h["confidence"], "status": h["status"],
+             "l1": (h.get("l1") or {}).get("verdict")} for h in s.profile["hypotheses"]]
+    cycle["snapshot"] = snap
+    return snap
+
+
+async def finish_turn(s: Session, cycle: dict, reply: Optional[str], next_msg: Optional[str] = None,
+                      reply_appended: bool = False) -> dict:
+    """Stages 7-8 of a cycle (they need the assistant's reply): the follow-ups, then learn."""
+    P, turn, user_msg = s.profile, cycle["turn"], cycle["user"]
+    cycle.pop("awaiting_reply", None)
+    if reply is not None:
         cycle["reply"] = reply
 
     # 7 probe ───────────────────────────────────────────────
@@ -655,16 +717,15 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
 
     # 8 learn ───────────────────────────────────────────────
     t0 = time.perf_counter()
-    snap = [{"id": h["id"], "kind": h["kind"], "claim": h["claim"], "conf": h["confidence"], "status": h["status"],
-             "l1": (h.get("l1") or {}).get("verdict")} for h in P["hypotheses"]]
-    prev = {x["id"]: x["conf"] for x in (s.cycles[-2]["snapshot"] if len(s.cycles) > 1 else [])}
+    snap = _snapshot(s, cycle)
+    i = s.cycles.index(cycle)
+    prev = {x["id"]: x["conf"] for x in (s.cycles[i - 1].get("snapshot") or [] if i > 0 else [])}
     moves = [f"{x['id']} {prev.get(x['id'], 0):.2f}→{x['conf']:.2f}" for x in snap
              if abs(x["conf"] - prev.get(x["id"], 0)) >= 0.01 and x["status"] == "active"]
-    cycle["snapshot"] = snap
     _stage(cycle, "learn", "done", "Profile after this turn", "; ".join(moves) or "no change", t0, moves=moves)
     for h in P["hypotheses"]:
         h.pop("_v", None)
-    if reply:
+    if reply and not reply_appended:
         s.turns.append({"role": "assistant", "content": reply})
     return cycle
 
@@ -688,6 +749,223 @@ def _turn_pair(chat: dict, k: int) -> tuple:
     return chat["turns"][i]["content"], reply, nxt
 
 
+# ───────────────────────── chime-in bridge (Open WebUI) ─────────────────────────
+# The official Agent Hub chime-in bridge POSTs the live conversation to /api/assist with
+# engine="ping". We map each Open WebUI chat (chat_id) to a Ping session and feed its turns
+# as they arrive (the real assistant replies, like a replay), so the official tool gets the
+# full hypothesis-driven Ping — profile, L1/L2, the gate — not just one-shot retrieval.
+
+_CHIME: "OrderedDict[str, Session]" = OrderedDict()
+MAX_CHIME = 60
+
+
+NEAR_MARGIN = 0.15             # within this of the gate, Ping is "close": the UI starts to glow
+
+
+def _top_conf(snapshot: Optional[list]) -> float:
+    live = [x["conf"] for x in (snapshot or []) if x.get("status") == "active"]
+    return round(max(live), 3) if live else 0.0
+
+
+# Gate criteria a user turn can still satisfy (confidence climbs, a follow-up confirms it).
+# The others (L1 held up, about work, not a repeat, not a dead end) block delivery outright,
+# so while one of them fails Ping is NOT "near" however confident it is.
+_SOFT = ("confidence", "confirmed by the user")
+_WAIT = {"confidence": "a bit more confidence", "confirmed by the user": "you to confirm it (a follow-up or a yes)"}
+
+
+def _gate_view(s: Session) -> dict:
+    """The newest cycle's gate, from the hypothesis it judged: which criteria still fail."""
+    gate = ((s.cycles[-1].get("stages") or {}).get("gate") or {}) if s.cycles else {}
+    data = gate.get("data") or {}
+    failed = [x["name"] for x in data.get("criteria") or [] if not x.get("ok")]
+    soft = [f for f in failed if f.startswith(_SOFT)]
+    hard = [f for f in failed if not f.startswith(_SOFT)]
+    return {"open": bool(data.get("open")), "failed": failed, "soft": soft, "hard": hard,
+            "hypothesis": data.get("hypothesis")}
+
+
+def _mood(s: Session, delivered: bool, n_new: int) -> dict:
+    """How Ping feels about this chat, for the bridge's animation and the Ops page:
+    confidence of the best live hypothesis vs the gate, and how it moved over this call.
+      cold      no live hypothesis worth mentioning
+      warming   confidence rose but is still well below the gate
+      near      within NEAR_MARGIN of the gate (the composer glows)
+      delivered the gate opened and Ping suggested something (full animation)
+      cooling   confidence dropped (a contradiction, a rejected check)
+      steady    no real change"""
+    conf = _top_conf(s.cycles[-1].get("snapshot")) if s.cycles else 0.0
+    before = s.cycles[-1 - n_new].get("snapshot") if len(s.cycles) > n_new else None
+    prev = _top_conf(before) if before is not None else 0.0
+    delta = round(conf - prev, 3)
+    g = _gate_view(s)
+    within = conf >= GATE_CONF - NEAR_MARGIN
+    # near = close on confidence AND nothing but soft criteria stand in the way; a gate that
+    # opened yet surfaced nothing is a dead end, not "almost"
+    near = within and not g["hard"] and not g["open"]
+    waiting = [next(v for k, v in _WAIT.items() if f.startswith(k)) for f in g["soft"]] if near else []
+    blocked = g["hard"] if within and not delivered else []
+    if delivered:
+        state = "delivered"
+    elif near:
+        state = "near"
+    elif delta <= -0.05:
+        state = "cooling"
+    elif delta >= 0.05:
+        state = "warming"
+    elif conf < 0.2:
+        state = "cold"
+    else:
+        state = "steady"
+    return {"state": state, "confidence": conf, "delta": delta, "gate": GATE_CONF, "near": GATE_CONF - NEAR_MARGIN,
+            "hypotheses": len(_live(s)),
+            "waiting": waiting,     # near: what would open the gate ("you to confirm it", ...)
+            "blocked": blocked}     # confident but held back by a hard criterion (Ops shows it)
+
+
+def _ops_cycle(s: Session, n_new: int) -> Optional[dict]:
+    """The newest cycle, compacted for the Ops job log (stripped from the bridge's reply)."""
+    if not s.cycles or not n_new:
+        return None
+    c = s.cycles[-1]
+    gate = (c.get("stages") or {}).get("gate") or {}
+    crit = (gate.get("data") or {}).get("criteria") or []
+    failed = [x["name"] for x in crit if not x.get("ok")]
+    return {"order": STAGES,
+            "stages": {k: {"status": v.get("status"), "ms": v.get("ms", 0), "title": v.get("title", "")}
+                       for k, v in (c.get("stages") or {}).items()},
+            "criteria": [{"name": x["name"], "ok": bool(x.get("ok")), "value": str(x.get("value"))} for x in crit],
+            "gate_title": gate.get("title"),
+            "gate_failed": ("gate closed: " + ", ".join(failed)) if failed else None,
+            "turns_run": n_new,
+            "hypotheses": [{"id": x["id"], "kind": x["kind"], "claim": x["claim"], "conf": x["conf"]}
+                           for x in (c.get("snapshot") or []) if x.get("status") == "active"]}
+
+
+def _chime_response(s: Session, sug: Optional[dict], n_new: int = 0, phase: Optional[str] = None) -> dict:
+    """Shape the latest cycle's suggestion like /api/assist, so the bridge renders it unchanged.
+    Adds `mood` (for Ping's animation) and `cycle` (for Ops; /api/assist strips it)."""
+    items = []
+    if sug:
+        items.append({"doc": sug["doc"], "title": sug["title"], "why": sug.get("why") or "",
+                      "snippet": sug.get("summary") or sug.get("excerpt") or "",
+                      "kind": sug.get("kind"), "who": sug.get("who"), "strength": sug.get("strength")})
+    return {"query": s.profile.get("goal") or "", "stay_quiet": not items,
+            "reason": None if items else "ping stayed quiet", "suggestions": items,
+            "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id,
+            "mood": _mood(s, bool(items), n_new), "cycle": _ops_cycle(s, n_new),
+            # Ping's follow-ups for this reply (stage 7): the bridge shows these as the chat's
+            # follow-up chips, so a click is the signal Ping learns from (support_probe)
+            "follow_ups": _follow_ups(s) if n_new else [], "phase": phase}
+
+
+def _follow_ups(s: Session) -> List[str]:
+    probe = ((s.cycles[-1].get("stages") or {}).get("probe") or {}) if s.cycles else {}
+    return [p["text"] for p in (probe.get("data") or {}).get("probes") or [] if p.get("text")]
+
+
+async def chime(req) -> dict:
+    """Run the Ping cycle for a live Open WebUI chat and return an assist-shaped reply.
+    `req` is the AssistRequest (duck-typed): dataset, turns, chat_id, exclude_docs."""
+    base = DS.get(req.dataset).id.split("~")[0]
+    key = f"{base}::{req.chat_id or 'anon'}"
+    s = _CHIME.get(key)
+    if s is None:
+        s = Session(base, None, "chime")
+        _CHIME[key] = s
+        while len(_CHIME) > MAX_CHIME:
+            _CHIME.popitem(last=False)
+    s.extra_exclude |= set(req.exclude_docs or [])
+    s.chat_id = req.chat_id
+    s.chat_model = getattr(req, "chat_model", None) or s.chat_model
+    if getattr(req, "user_id", None):
+        s.user_id, s.user_name = req.user_id, getattr(req, "user_name", None) or req.user_id
+
+    # The bridge sends a (truncated) window of the conversation. Run any user message we
+    # haven't run yet, in order, each with the assistant reply that follows it (the newest
+    # user message has none yet). Match by content so a truncated window still lines up.
+    # Worked out UNDER the lock: a call that arrives while an earlier one is still running
+    # (the bridge timed out and the user sent another turn) waits, then skips what it ran.
+    msgs = [{"role": t.role, "content": (t.content or "").strip()} for t in req.turns]
+    users = [i for i, m in enumerate(msgs) if m["role"] == "user" and m["content"]]
+
+    phase = getattr(req, "phase", None)   # "early": sent with the user's message; "late": the reply is done
+
+    def reply_after(content: str):
+        """(found, reply): the assistant message after this user message in the window, and
+        whether the conversation has moved past it (a later user message: no reply is coming)."""
+        k = next((n for n, i in enumerate(users) if msgs[i]["content"] == content), None)
+        if k is None:
+            return False, None
+        i, end = users[k], (users[k + 1] if k + 1 < len(users) else len(msgs))
+        rp = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant" and m["content"]), None)
+        return rp is not None or k + 1 < len(users), rp
+
+    async with s.lock:
+        # 1. split turns waiting for their reply: finish them now that it is here (or once the
+        #    chat has moved on, or on a "late" call that brings none: the reply was stopped)
+        finished, late_sug = 0, None
+        for idx, c in enumerate(s.cycles):
+            if not c.get("awaiting_reply"):
+                continue
+            ready, rp = reply_after(c["user"])
+            if not ready and phase == "early":
+                continue                      # a repeated early call: the reply is still coming
+            try:
+                await finish_turn(s, c, rp)
+            except Exception as e:
+                c.pop("awaiting_reply", None)
+                c["error"] = f"finish: {type(e).__name__}: {e}"[:300]
+                continue
+            finished += 1
+            if idx >= s._returned and c.get("suggestion"):
+                late_sug = c["suggestion"]    # its early call never reached the user: deliver it now
+
+        todo = []
+        for n, i in enumerate(users):
+            if msgs[i]["content"] in s._chime_processed:
+                continue
+            end = users[n + 1] if n + 1 < len(users) else len(msgs)
+            reply = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant"), None)
+            todo.append((msgs[i]["content"], reply))
+        if not todo and finished:
+            return _chime_response(s, late_sug, finished, phase="late")
+        if not todo:
+            # Nothing new to run. If a cycle finished after its caller gave up (bridge timeout),
+            # hand it back now so its follow-ups and suggestion aren't lost; otherwise stay quiet
+            # (never re-fire a suggestion that was already delivered).
+            unreturned = len(s.cycles) - s._returned
+            if unreturned > 0:
+                return _chime_response(s, s.cycles[-1].get("suggestion"), unreturned)
+            return _chime_response(s, None)
+        s.status = "running"
+        try:
+            for n, (um, rp) in enumerate(todo):
+                # the newest message of an early call has no reply yet: run its search half now
+                split = phase == "early" and rp is None and n == len(todo) - 1
+                await run_turn(s, um, rp, None, chat=False, early=split)
+                s._chime_processed.append(um)
+            s.status = "idle"
+        except Exception as e:
+            s.status, s.error = "error", f"{type(e).__name__}: {e}"[:300]
+            if s.cycles:
+                s.cycles[-1]["error"] = s.error
+            return {"query": "", "stay_quiet": True, "reason": s.error, "suggestions": [], "error": True,
+                    "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id,
+                    "mood": _mood(s, False, 0), "cycle": None}
+        return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None, len(todo),
+                               phase="early" if phase == "early" else None)
+
+
+def mark_returned(session_id: Optional[str]) -> None:
+    """The caller received this session's latest result (assist() calls this only while the
+    client is still connected), so a later call with nothing new stays quiet instead of
+    handing it back again."""
+    s = _SESSIONS.get(session_id or "") or next((x for x in _CHIME.values() if x.id == session_id), None)
+    if s is not None:
+        s._returned = len(s.cycles)
+
+
 # ───────────────────────── API ─────────────────────────
 
 class NewSession(BaseModel):
@@ -698,6 +976,38 @@ class NewSession(BaseModel):
 
 class Say(BaseModel):
     message: str
+
+
+class Feedback(BaseModel):
+    dataset: Optional[str] = None
+    chat_id: Optional[str] = None
+    doc: str
+    helpful: bool = False
+
+
+def dismiss(s: Session, doc: str) -> dict:
+    """The user dismissed a find: never show it again in this chat, take confidence from the
+    hypothesis that surfaced it (it must earn its way back), and keep a note the next profile
+    updates see."""
+    # already in "suggested" (so the dive never offers it again); kept out of extra_exclude on
+    # purpose, which would also hide it from the L1 check and make other hypotheses look unsupported
+    if doc not in s.profile["suggested"]:
+        s.profile["suggested"].append(doc)
+    sug = next((c["suggestion"] for c in reversed(s.cycles)
+                if (c.get("suggestion") or {}).get("doc") == doc), None) or {}
+    turn = len(s.cycles)
+    h = next((x for x in s.profile["hypotheses"] if x["id"] == sug.get("hypothesis")), None)
+    if h and h["status"] == "active":
+        _bump(h, DELTA["dismissed"], turn, "dismissed", f"the user dismissed {sug.get('title') or doc} as not helpful")
+        h["confirmed"] = False
+        if h["confidence"] < 0.10:
+            h["status"] = "retired"
+            h["history"].append({"turn": turn, "delta": 0, "source": "retired",
+                                 "why": "dismissed below 0.10", "conf": h["confidence"]})
+    if not any(d["doc"] == doc for d in s.profile["dismissed"]):
+        s.profile["dismissed"].append({"doc": doc, "title": sug.get("title") or doc, "kind": sug.get("kind"),
+                                       "hypothesis": sug.get("hypothesis"), "turn": turn, "at": time.time()})
+    return {"ok": True, "session": s.id, "hypothesis": h and {"id": h["id"], "conf": h["confidence"], "status": h["status"]}}
 
 
 def _state(s: Session) -> dict:
@@ -809,6 +1119,19 @@ async def say(sid: str, req: Say, wait: bool = False):
     else:
         asyncio.create_task(task)
     return {"id": s.id}
+
+
+@router.post("/feedback")
+async def feedback(req: Feedback):
+    """A find's feedback from the chime bridge (Open WebUI): dismissed = not helpful."""
+    if req.helpful:
+        return {"ok": True, "ignored": "only dismissals are recorded"}
+    base = DS.get(req.dataset).id.split("~")[0]
+    s = _CHIME.get(f"{base}::{req.chat_id or 'anon'}")
+    if s is None:
+        raise HTTPException(404, "no Ping session for this chat (sessions are kept in memory and lost on restart)")
+    async with s.lock:   # not while a cycle is mid-update
+        return dismiss(s, req.doc)
 
 
 @router.get("/sessions")

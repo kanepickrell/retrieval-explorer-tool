@@ -226,9 +226,16 @@ const pendingMetrics = (): Metric[] =>
 /** Generate (once, cached by the backend) the grounded answer for a retrieval run,
  *  over exactly that run's context. Kept separate from runRetrieval so the graph +
  *  chunks render instantly and this slow LLM call only happens when needed. */
+/** How an answer was made: "graph" = an exact lookup on the metadata graph (graph_query.py),
+ *  "text" = the model over the retrieved records. `graph` carries the lookup (or why it was skipped). */
+export type AnswerMeta = {
+  route: "graph" | "text";
+  graph?: { query?: string; text?: string; skipped?: string; ms?: number } | null;
+};
+
 export async function generateAnswer(
   runId: string,
-): Promise<{ answer: string; timeMs: number; groundedChunks: number; note?: string }> {
+): Promise<{ answer: string; timeMs: number; groundedChunks: number; note?: string; meta: AnswerMeta }> {
   try {
     const d = await getJson("/api/search/answer", { run_id: runId });
     return {
@@ -236,9 +243,10 @@ export async function generateAnswer(
       timeMs: Math.round(Number(d.time_ms ?? 0)),
       groundedChunks: Number(d.grounded_chunks ?? 0),
       note: d.note ? String(d.note) : undefined,
+      meta: { route: d.route === "graph" ? "graph" : "text", graph: d.graph ?? null },
     };
   } catch (err) {
-    return { answer: "", timeMs: 0, groundedChunks: 0, note: `answer generation failed: ${(err as Error).message}` };
+    return { answer: "", timeMs: 0, groundedChunks: 0, note: `answer generation failed: ${(err as Error).message}`, meta: { route: "text" } };
   }
 }
 
@@ -528,3 +536,132 @@ export const newPingSession = (datasetId: string, chatId?: string): Promise<Ping
 export const pingNext = (id: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/next`);
 export const pingSay = (id: string, message: string) => sendJson("POST", `/api/ping/sessions/${encodeURIComponent(id)}/say`, { message });
 export const resetPing = () => sendJson("DELETE", "/api/ping/sessions");
+
+
+// ───────────────────────── Ops (server/ops.py) ─────────────────────────
+
+/** KPI strip over a time window. */
+export type OpsSummary = {
+  hours: number; rev: number; users: number; active_users: number; sessions: number; active_sessions: number;
+  jobs: number; running: number; suggested: number; quiet: number; errors: number;
+  chime_rate: number | null; p50_ms: number | null; p95_ms: number | null;
+};
+export type OpsUser = {
+  user: string; user_name: string; jobs: number; sessions: number; suggested: number; quiet: number;
+  errors: number; running: number; last_at: number; avg_ms: number | null; confidence: number | null;
+};
+export type OpsStage = { name: string; status: string; ms: number; title: string };
+export type OpsMood = { state: string; confidence: number; delta: number; gate: number; near: number; hypotheses?: number;
+  waiting?: string[]; blocked?: string[] };
+/** One chime-in call: a Ping cycle (engine "ping") or one assist pass. */
+export type OpsJob = {
+  id: number; rev: number; at: number; done_at: number | null;
+  status: "running" | "suggested" | "quiet" | "followups" | "error" | "lost";
+  user: string; user_name: string; chat_id: string | null; session_id: string | null;
+  source: string; engine: string; dataset: string | null; chat_model: string | null; message: string; reason: string | null;
+  confidence: number | null; delta: number | null; gate: number | null; total_ms: number | null;
+  detail: {
+    stages: OpsStage[]; criteria: { name: string; ok: boolean; value: string }[]; gate_title: string | null;
+    turns_run: number | null; hypotheses: { id: string; kind: string; claim: string; conf: number }[];
+    suggestions: { doc: string; title: string; why: string; kind?: string }[]; query: string | null; mood: OpsMood | Record<string, never>;
+    follow_ups?: string[]; engine_models?: { llm?: string; judge?: string; embed?: string };
+  } | null;
+};
+export type LlmTask = { kind: string; model: string; task: string; calls: number; failed: number; empty: number;
+  reloads: number; p50_ms: number | null; p95_ms: number | null; tokens_per_s: number | null };
+
+export const getOpsSummary = (hours: number): Promise<OpsSummary> => getJson("/api/ops/summary", { hours });
+export const listOpsUsers = (hours: number): Promise<OpsUser[]> => getJson("/api/ops/users", { hours });
+export const listOpsJobs = (hours: number, after = 0, user?: string): Promise<{ rev: number; jobs: OpsJob[] }> =>
+  getJson("/api/ops/jobs", { hours, after, user, limit: 80 });
+export const getLlmStats = (): Promise<{ tasks: LlmTask[] }> => getJson("/api/llm/stats", { last: 0 });
+
+// ───────────────────────── Semantic model (/api/schema) ─────────────────────────
+
+export type SchemaStatus = "implemented" | "proposed";
+export type SchemaPropertyType = "string" | "integer" | "number" | "date" | "boolean" | "enum";
+/** A structured fact the graph build writes on a class's nodes (classes[...].properties). */
+export type SchemaProperty = {
+  type?: SchemaPropertyType; description?: string; source?: string; values?: string[]; taxonomy?: string; status?: SchemaStatus;
+};
+export type SchemaClass = {
+  parent?: string | null; abstract?: boolean; status?: SchemaStatus; description?: string; key?: string; source?: string;
+  properties?: Record<string, SchemaProperty>;
+};
+export type PropertyMetric = {
+  count: number; total: number; bad: number; bad_examples: string[]; examples: string[]; defined_on: string;
+};
+export type ClassPropertyMetrics = { properties: Record<string, PropertyMetric>; undeclared: Record<string, number>; nodes: number };
+export type SchemaRelation = { from: string[]; to: string[]; status?: SchemaStatus; source?: string; description?: string };
+export type SchemaTerm = { description?: string; aliases?: string[]; children?: Record<string, SchemaTerm> };
+export type SchemaTaxonomy = {
+  description?: string; class?: string; applies_to?: string[]; assigned_by?: string; max_per_record?: number;
+  terms: Record<string, SchemaTerm>; rejected?: string[];
+};
+export type SchemaGlossaryTerm = { definition?: string; not?: string; synonyms?: string[]; used_by?: string[] };
+export type SchemaRule = { description?: string; from: string; to: string; via: string[][]; status?: SchemaStatus };
+export type SemanticSchema = {
+  version: number; name?: string; description?: string;
+  classes: Record<string, SchemaClass>; relations: Record<string, SchemaRelation>;
+  taxonomies: Record<string, SchemaTaxonomy>; glossary: Record<string, SchemaGlossaryTerm>; rules: Record<string, SchemaRule>;
+};
+export type SchemaDoc = {
+  schema: SemanticSchema; yaml: string; version: number; path: string; errors: string[];
+  history: { version: number; replaced_at: string; file: string }[]; saved?: number;
+};
+export type TaxonomyMetrics = {
+  records: number; assigned: number; terms: Record<string, number>; groups: Record<string, number>;
+  not_in_schema: Record<string, number>; graph_terms_not_in_schema: Record<string, number>;
+  current_vocab: string; tagged_vocab: string | null; stale: boolean; suggested?: number; assigned_by?: string;
+};
+export type SchemaSnapshot = {
+  graph_built_at: number | null; tagged_at: number | null; measured_at: number; docs: number; nodes: number; edges: number;
+  violations: number; classes: Record<string, number>; relations: Record<string, number>;
+  taxonomies: Record<string, { assigned: number; records: number; suggested?: number; terms: Record<string, number> }>;
+};
+export type SchemaMetrics = {
+  dataset: string; schema_version: number; has_graph: boolean; graph_built_at: number | null; tagged_at: number | null;
+  docs: number; nodes: number; edges: number; violations: number;
+  classes: Record<string, { count: number; total: number }>;
+  unknown_classes: Record<string, number>;
+  relations: Record<string, { count: number; violations: number; examples: string[]; pairs: Record<string, number> }>;
+  unknown_relations: Record<string, number>;
+  taxonomies: Record<string, TaxonomyMetrics>;
+  glossary: Record<string, number>;
+  rules: Record<string, { edges: number; sample: string[] }>;
+  properties?: Record<string, ClassPropertyMetrics>;
+  property_violations?: number;
+  history: SchemaSnapshot[];
+};
+export type SchemaDatasetRow = {
+  dataset: string; docs: number; nodes: number; edges: number; has_graph: boolean; violations: number;
+  unknown_classes: number; unknown_relations: number; graph_built_at: number | null; stale: string[];
+  coverage: Record<string, [number, number]>;
+};
+
+export const getSchema = (): Promise<SchemaDoc> => getJson("/api/schema");
+export const saveSchema = (body: { schema?: SemanticSchema; yaml?: string; base_version: number }): Promise<SchemaDoc> =>
+  sendJson("PUT", "/api/schema", body);
+export const validateSchema = (body: { schema?: SemanticSchema; yaml?: string }): Promise<{ errors: string[] }> =>
+  sendJson("POST", "/api/schema/validate", body);
+export const getSchemaMetrics = (dataset: string): Promise<SchemaMetrics> => getJson("/api/schema/metrics", { dataset });
+export const listSchemaDatasets = (): Promise<SchemaDatasetRow[]> => getJson("/api/schema/datasets");
+
+// ── bottom-up vocabulary growth (Prospector > Semantic model > suggestions)
+export type SuggestionEvidence = { doc: string; dataset: string; title: string; author: string | null; picked: string[] };
+export type SuggestionGroup = {
+  taxonomy: string; term: string; variants: string[]; description: string; records: number; users: string[];
+  evidence: SuggestionEvidence[]; nearest: string | null; nearest_score: number; parent: string | null; ready: boolean;
+  same_as: string | null;   // the LLM grouping says it means this existing term
+};
+export type TermHealth = { taxonomy: string; term: string | null; kind: "overloaded" | "unused" | "gaps"; count: number; records: number; note: string };
+export type SchemaSuggestions = {
+  schema_version: number; thresholds: { min_records: number; min_users: number; overloaded: number };
+  groups: SuggestionGroup[]; health: TermHealth[]; hub_tags: Record<string, Record<string, number>>;
+};
+export type ReviewAction = "approve" | "merge" | "reject";
+export const getSchemaSuggestions = (dataset?: string): Promise<SchemaSuggestions> =>
+  getJson("/api/schema/suggestions", dataset ? { dataset } : undefined);
+export const reviewSuggestion = (action: ReviewAction, body: {
+  taxonomy: string; term?: string; names?: string[]; description?: string; parent?: string | null; into?: string; base_version: number;
+}): Promise<SchemaDoc> => sendJson("POST", `/api/schema/suggestions/${action}`, body);

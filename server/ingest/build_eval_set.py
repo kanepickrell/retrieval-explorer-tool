@@ -52,10 +52,12 @@ def main(export_dir: str, docs_dir: str, out_path: str) -> None:
             dropped.append((cid, "not indexed"))
             continue
         turns = sorted(msgs[cid], key=lambda m: int(m.get("created_at") or 0))
-        first_user = next((i for i, m in enumerate(turns) if m["role"] == "user" and msg_text(m).strip()), None)
-        if first_user is None:
+        # the first SUBSTANTIVE request: people often open with "hi" and ask on the next turn
+        users = [i for i, m in enumerate(turns) if m["role"] == "user" and msg_text(m).strip()]
+        if not users:
             dropped.append((cid, "no user turn"))
             continue
+        first_user = next((i for i in users if len(msg_text(turns[i]).strip()) >= MIN_QUERY_CHARS), users[0])
         reply = next((m for m in turns[first_user + 1:] if m["role"] == "assistant" and msg_text(m).strip()), None)
         if reply is None:
             dropped.append((cid, "no assistant reply"))

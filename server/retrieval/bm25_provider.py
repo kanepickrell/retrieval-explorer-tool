@@ -136,3 +136,39 @@ def search_fused(query: str, limit: int = 20, storage_dir: str = None, depth: in
     LAST_STEPS = steps
     _with_cosine(out, query, storage_dir)
     return out
+
+
+def search_within(query: str, docs, storage_dir: str = None, limit: int = 50) -> List[Dict]:
+    """Follow the link: rank ONLY the passages of the given documents (by doc id, i.e.
+    the file_path a graph node carries), BM25 + vector fused by RRF. Every passage of those
+    documents is a candidate, so a scoped document can't be crowded out by the rest of the
+    index the way a filtered global search can."""
+    import numpy as np
+    docs = set(docs or ())
+    ix, _ = _index(storage_dir)
+    idx, bm25 = ix["vec"], ix["bm25"]
+    rows_i = [i for i, t in enumerate(idx["titles"]) if (t or idx["ids"][i]) in docs]
+    if not rows_i:
+        return []
+    q = tokenize(query)
+    b = bm25.get_scores(q) if bm25 is not None and q else None
+    b_rank = sorted((i for i in rows_i if b is not None and b[i] > 0), key=lambda i: -b[i])
+    cos: Dict[int, float] = {}
+    qv = vp._embed_query(query) if len(idx["mat"]) else None
+    if qv is not None:
+        sims = idx["mat"][rows_i] @ np.asarray(qv, dtype=np.float32)
+        cos = {i: float(s) for i, s in zip(rows_i, sims)}
+    v_rank = sorted(rows_i, key=lambda i: -cos[i]) if cos else []
+    rrf: Dict[int, float] = {}
+    for lst in (b_rank, v_rank):
+        for rank, i in enumerate(lst, 1):
+            rrf[i] = rrf.get(i, 0.0) + 1.0 / (RRF_K + rank)
+    order = sorted(rows_i, key=lambda i: (-rrf.get(i, 0.0), i))[:limit]
+    out = []
+    for rank, i in enumerate(order, 1):
+        title = idx["titles"][i] or idx["ids"][i]
+        out.append({"id": title, "label": title, "type": "chunk", "chunk_id": idx["ids"][i],
+                    "description": (idx["contents"][i] or "")[:200], "content": idx["contents"][i] or "",
+                    "relevance_score": round(cos[i], 4) if i in cos else None,
+                    "rrf_score": round(rrf.get(i, 0.0), 5), "rank": rank, "via": "within", "source": "within"})
+    return out
