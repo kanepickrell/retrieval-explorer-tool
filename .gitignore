@@ -4,3 +4,12 @@ dist
 
 # real-data exports: never commit
 server/datasets/incoming/
+server/datasets/archive/
+
+# semantic model: earlier versions kept on each save from Prospector
+server/datasets/schema/history/
+server/datasets/schema/candidates.json
+
+# test run outputs (contain excerpts of real exports)
+server/tests/*.json
+server/tests/*.log

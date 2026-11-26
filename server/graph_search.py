@@ -107,6 +107,8 @@ async def run_unified(q: str, limit: int = 20, force_strategy: Optional[str] = N
         context_text = "\n\n".join(f"[{r['id']}]\n{c}" for r, c in zip(results, contexts))
         if ds.storage.name == "storage-metadata":
             graph = _metadata_subgraph(ds.storage, [r["id"] for r in results])
+        elif (ds.storage.parent / "storage-metadata").is_dir():   # passages: show the records they belong to
+            graph = _metadata_subgraph(ds.storage.parent / "storage-metadata", [r["id"] for r in results])
         if not results:
             note = ("no keyword matches for this query" if strategy == "bm25" else
                     "no vector results -- check the embed host "
@@ -172,6 +174,20 @@ async def _ensure_answer(run) -> None:
         return
     from retrieval import ollama_client as ollama
     t0 = time.time()
+    # factual lookups (counts, lists, who-belongs-where) are answered exactly from the metadata
+    # graph (graph_query.py); everything else falls through to the answer over the retrieved text
+    try:
+        import graph_query
+        g = await graph_query.answer(run.query, run.dataset, lambda p, s: ollama.llm(p, system_prompt=s))
+        if g is not None:
+            run.graph_answer = g
+            if g.get("answer"):
+                run.answer = g["answer"]
+                run.answer_note = f"answered from the graph: {g['query']}"
+                run.answer_ms = round((time.time() - t0) * 1000, 1)
+                return
+    except Exception as e:   # noqa: BLE001 - a failed lookup must never block the normal answer
+        run.graph_answer = {"skipped": f"graph lookup failed: {e!r}"[:200]}
     try:
         if not run.retrieved_ids:
             run.answer, run.answer_note = "", "nothing was retrieved, so there is nothing to ground an answer in"
@@ -196,6 +212,10 @@ async def answer(run_id: str = Query(..., description="run_id from /unified")):
         "grounded_chunks": len(run.contexts),
         "time_ms": run.answer_ms,
         "note": run.answer_note,
+        # "graph" when the answer is an exact lookup on the metadata graph, else "text"
+        "route": "graph" if (run.graph_answer or {}).get("answer") else "text",
+        "graph": {k: v for k, v in (run.graph_answer or {}).items() if k in ("query", "text", "skipped", "ms", "result")}
+                 or None,
     }
 
 
@@ -217,7 +237,9 @@ async def evaluate(run_id: str = Query(..., description="run_id from /unified"))
     ref_free = {"faithfulness": None, "answer_relevancy": None, "context_precision": None}
     if answer_text and contexts:
         try:
-            ref_free = await M.reference_free(run.query, answer_text, contexts, grounding=run.context_text or None)
+            # a graph answer is grounded in the lookup result, not in the retrieved text
+            grounding = (run.graph_answer or {}).get("text") if (run.graph_answer or {}).get("answer") else run.context_text
+            ref_free = await M.reference_free(run.query, answer_text, contexts, grounding=grounding or None)
         except Exception as e:
             note = (note or "") + f" | metrics failed: {e!r}"[:120]
 

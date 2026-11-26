@@ -51,6 +51,8 @@ from ping_cycle import router as ping_router  # noqa: E402
 app.include_router(ping_router)  # /api/ping (Ping cycle: profile, probes, gate, per-turn stages)
 from ops import router as ops_router  # noqa: E402
 app.include_router(ops_router)  # /api/ops (persistent chime-in jobs for the Ops dashboard)
+from schema_api import router as schema_router  # noqa: E402
+app.include_router(schema_router)  # /api/schema (semantic model: edit, validate, measure datasets)
 
 _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 
@@ -58,7 +60,11 @@ _GRAPH_CACHE: dict = {}   # graphml path -> (mtime, graph)
 def _load_corpus_graph(dataset: str | None = None) -> dict:
     """Read a dataset's LightRAG graphml into the frontend's {nodes, edges} shape.
     Cached per file, reloaded when the file changes (e.g. after a re-index)."""
-    graphml = DS.get(dataset).storage / "graph_chunk_entity_relation.graphml"
+    storage = DS.get(dataset).storage
+    graphml = storage / "graph_chunk_entity_relation.graphml"
+    if not graphml.exists() and (storage.parent / "storage-metadata" / graphml.name).exists():
+        # passages-only full text: the export's one graph is the metadata graph
+        graphml = storage.parent / "storage-metadata" / graphml.name
     if not graphml.exists():
         raise HTTPException(404, f"no graph for dataset '{dataset}' (index not built yet)")
     mtime = graphml.stat().st_mtime

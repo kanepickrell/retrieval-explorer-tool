@@ -1,6 +1,6 @@
 import * as Tabs from "@radix-ui/react-tabs";
 import { Loader2 } from "lucide-react";
-import { TECHNIQUE_LABEL, type Chunk, type Metric, type RetrievalResult } from "@/lib/api";
+import { TECHNIQUE_LABEL, type AnswerMeta, type Chunk, type Metric, type RetrievalResult } from "@/lib/api";
 import StepsPanel from "./StepsPanel";
 import ContextPanel from "./ContextPanel";
 import AnswerPanel from "./AnswerPanel";
@@ -14,6 +14,7 @@ type Props = {
   activeChunkId: string | null;
   onChunk: (c: Chunk | null) => void;
   answer: string;
+  answerMeta?: AnswerMeta;
   answerLoading: boolean;
   evalMetrics: Metric[] | null;
   evalLoading: boolean;
@@ -41,7 +42,7 @@ function Summary({ r, loading }: { r: RetrievalResult; loading: boolean }) {
   );
 }
 
-export default function InspectorTabs({ result, loading, tab, onTab, activeChunkId, onChunk, answer, answerLoading, evalMetrics, evalLoading, onEvaluate }: Props) {
+export default function InspectorTabs({ result, loading, tab, onTab, activeChunkId, onChunk, answer, answerMeta, answerLoading, evalMetrics, evalLoading, onEvaluate }: Props) {
   const empty = (
     <div className="flex h-full flex-col items-center justify-center gap-1 py-10 text-center">
       {loading ? <Loader2 size={18} className="animate-spin text-local" /> : null}
@@ -68,7 +69,7 @@ export default function InspectorTabs({ result, loading, tab, onTab, activeChunk
             {result ? <ContextPanel chunks={result.chunks} activeId={activeChunkId} onSelect={onChunk} /> : empty}
           </Tabs.Content>
           <Tabs.Content value="answer" className="h-full">
-            {result ? <AnswerPanel answer={answer} loading={answerLoading} chunkCount={result.chunks.length} onShowContext={() => onTab("context")} /> : empty}
+            {result ? <AnswerPanel answer={answer} meta={answerMeta} loading={answerLoading} chunkCount={result.chunks.length} onShowContext={() => onTab("context")} /> : empty}
           </Tabs.Content>
         </div>
       </Tabs.Root>

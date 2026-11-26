@@ -36,6 +36,9 @@ class Run:
     answer: Optional[str] = None
     answer_ms: Optional[float] = None
     answer_note: Optional[str] = None
+    # set when the answer came from a structured lookup on the metadata graph (graph_query.py):
+    # {"plan": ..., "result": ..., "text": ...} instead of from the retrieved text
+    graph_answer: Optional[dict] = None
 
 
 _RUNS: "OrderedDict[str, Run]" = OrderedDict()

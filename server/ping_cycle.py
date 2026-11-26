@@ -43,6 +43,10 @@ and the real next message as ground truth for the probes and hypotheses.
   POST   /api/ping/sessions/{id}/say     {message}: the assistant replies at once; Ping's cycle runs in the background and chimes in below if it finds something
   GET    /api/ping/sessions              recent sessions
   GET    /api/ping/sessions/{id}         full state: profile, turns, every cycle's stages
+  Split turns (chime bridge, phase="early" / "late"): the bridge calls once when the user
+  sends a message (stages 1-6 run while the chat model writes its reply, so a find can land
+  before the reply finishes) and again when the reply is done (probe + learn, which need it).
+  A call without a phase runs the whole turn, as before.
   POST   /api/ping/feedback              {dataset, chat_id, doc, helpful}: the user dismissed a find
                                          in Open WebUI; it never comes back in that chat, the
                                          hypothesis behind it loses confidence, and the next updates
@@ -373,11 +377,15 @@ def _clip(t: str, n: int) -> str:
 # ───────────────────────── the cycle ─────────────────────────
 
 async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Optional[str] = None,
-                   chat: bool = False) -> dict:
+                   chat: bool = False, early: bool = False) -> dict:
     """One full cycle for a user message. Replays pass the real reply; chat=True (a typed
     message) has the chat model answer UP FRONT (before the expensive stages), blind to the
     cycle, so the user isn't blocked on Ping; the suggest stage then chimes in separately
-    below the reply. The follow-ups are written after the cycle."""
+    below the reply. The follow-ups are written after the cycle.
+
+    early=True (a split turn): stop after the suggest stage; the reply is still being written.
+    finish_turn() runs probe + learn once it arrives. Stages 1-6 never read this turn's reply
+    (the update reads the PREVIOUS reply), so splitting changes nothing they decide."""
     from retrieval import vector_provider as vp
     L = A._layers(s.dataset)
     turn = len(s.cycles) + 1
@@ -651,6 +659,28 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
 
     # (the reply was already produced up front, before this cycle ran)
 
+    _snapshot(s, cycle)     # Ping's state after the search half (mood, Ops), redone by learn
+    if early:
+        cycle["awaiting_reply"] = True
+        return cycle
+    return await finish_turn(s, cycle, reply, next_msg, reply_appended)
+
+
+def _snapshot(s: Session, cycle: dict) -> list:
+    snap = [{"id": h["id"], "kind": h["kind"], "claim": h["claim"], "conf": h["confidence"], "status": h["status"],
+             "l1": (h.get("l1") or {}).get("verdict")} for h in s.profile["hypotheses"]]
+    cycle["snapshot"] = snap
+    return snap
+
+
+async def finish_turn(s: Session, cycle: dict, reply: Optional[str], next_msg: Optional[str] = None,
+                      reply_appended: bool = False) -> dict:
+    """Stages 7-8 of a cycle (they need the assistant's reply): the follow-ups, then learn."""
+    P, turn, user_msg = s.profile, cycle["turn"], cycle["user"]
+    cycle.pop("awaiting_reply", None)
+    if reply is not None:
+        cycle["reply"] = reply
+
     # 7 probe ───────────────────────────────────────────────
     t0 = time.perf_counter()
     open_h = [h for h in _live(s)]
@@ -687,12 +717,11 @@ async def run_turn(s: Session, user_msg: str, reply: Optional[str], next_msg: Op
 
     # 8 learn ───────────────────────────────────────────────
     t0 = time.perf_counter()
-    snap = [{"id": h["id"], "kind": h["kind"], "claim": h["claim"], "conf": h["confidence"], "status": h["status"],
-             "l1": (h.get("l1") or {}).get("verdict")} for h in P["hypotheses"]]
-    prev = {x["id"]: x["conf"] for x in (s.cycles[-2]["snapshot"] if len(s.cycles) > 1 else [])}
+    snap = _snapshot(s, cycle)
+    i = s.cycles.index(cycle)
+    prev = {x["id"]: x["conf"] for x in (s.cycles[i - 1].get("snapshot") or [] if i > 0 else [])}
     moves = [f"{x['id']} {prev.get(x['id'], 0):.2f}→{x['conf']:.2f}" for x in snap
              if abs(x["conf"] - prev.get(x["id"], 0)) >= 0.01 and x["status"] == "active"]
-    cycle["snapshot"] = snap
     _stage(cycle, "learn", "done", "Profile after this turn", "; ".join(moves) or "no change", t0, moves=moves)
     for h in P["hypotheses"]:
         h.pop("_v", None)
@@ -813,7 +842,7 @@ def _ops_cycle(s: Session, n_new: int) -> Optional[dict]:
                            for x in (c.get("snapshot") or []) if x.get("status") == "active"]}
 
 
-def _chime_response(s: Session, sug: Optional[dict], n_new: int = 0) -> dict:
+def _chime_response(s: Session, sug: Optional[dict], n_new: int = 0, phase: Optional[str] = None) -> dict:
     """Shape the latest cycle's suggestion like /api/assist, so the bridge renders it unchanged.
     Adds `mood` (for Ping's animation) and `cycle` (for Ops; /api/assist strips it)."""
     items = []
@@ -827,7 +856,7 @@ def _chime_response(s: Session, sug: Optional[dict], n_new: int = 0) -> dict:
             "mood": _mood(s, bool(items), n_new), "cycle": _ops_cycle(s, n_new),
             # Ping's follow-ups for this reply (stage 7): the bridge shows these as the chat's
             # follow-up chips, so a click is the signal Ping learns from (support_probe)
-            "follow_ups": _follow_ups(s) if n_new else []}
+            "follow_ups": _follow_ups(s) if n_new else [], "phase": phase}
 
 
 def _follow_ups(s: Session) -> List[str]:
@@ -860,7 +889,38 @@ async def chime(req) -> dict:
     msgs = [{"role": t.role, "content": (t.content or "").strip()} for t in req.turns]
     users = [i for i, m in enumerate(msgs) if m["role"] == "user" and m["content"]]
 
+    phase = getattr(req, "phase", None)   # "early": sent with the user's message; "late": the reply is done
+
+    def reply_after(content: str):
+        """(found, reply): the assistant message after this user message in the window, and
+        whether the conversation has moved past it (a later user message: no reply is coming)."""
+        k = next((n for n, i in enumerate(users) if msgs[i]["content"] == content), None)
+        if k is None:
+            return False, None
+        i, end = users[k], (users[k + 1] if k + 1 < len(users) else len(msgs))
+        rp = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant" and m["content"]), None)
+        return rp is not None or k + 1 < len(users), rp
+
     async with s.lock:
+        # 1. split turns waiting for their reply: finish them now that it is here (or once the
+        #    chat has moved on, or on a "late" call that brings none: the reply was stopped)
+        finished, late_sug = 0, None
+        for idx, c in enumerate(s.cycles):
+            if not c.get("awaiting_reply"):
+                continue
+            ready, rp = reply_after(c["user"])
+            if not ready and phase == "early":
+                continue                      # a repeated early call: the reply is still coming
+            try:
+                await finish_turn(s, c, rp)
+            except Exception as e:
+                c.pop("awaiting_reply", None)
+                c["error"] = f"finish: {type(e).__name__}: {e}"[:300]
+                continue
+            finished += 1
+            if idx >= s._returned and c.get("suggestion"):
+                late_sug = c["suggestion"]    # its early call never reached the user: deliver it now
+
         todo = []
         for n, i in enumerate(users):
             if msgs[i]["content"] in s._chime_processed:
@@ -868,6 +928,8 @@ async def chime(req) -> dict:
             end = users[n + 1] if n + 1 < len(users) else len(msgs)
             reply = next((m["content"] for m in msgs[i + 1:end] if m["role"] == "assistant"), None)
             todo.append((msgs[i]["content"], reply))
+        if not todo and finished:
+            return _chime_response(s, late_sug, finished, phase="late")
         if not todo:
             # Nothing new to run. If a cycle finished after its caller gave up (bridge timeout),
             # hand it back now so its follow-ups and suggestion aren't lost; otherwise stay quiet
@@ -878,8 +940,10 @@ async def chime(req) -> dict:
             return _chime_response(s, None)
         s.status = "running"
         try:
-            for um, rp in todo:
-                await run_turn(s, um, rp, None, chat=False)
+            for n, (um, rp) in enumerate(todo):
+                # the newest message of an early call has no reply yet: run its search half now
+                split = phase == "early" and rp is None and n == len(todo) - 1
+                await run_turn(s, um, rp, None, chat=False, early=split)
                 s._chime_processed.append(um)
             s.status = "idle"
         except Exception as e:
@@ -889,7 +953,8 @@ async def chime(req) -> dict:
             return {"query": "", "stay_quiet": True, "reason": s.error, "suggestions": [], "error": True,
                     "engine": "ping", "candidates": [], "stages": [], "retrieval": None, "session": s.id,
                     "mood": _mood(s, False, 0), "cycle": None}
-        return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None, len(todo))
+        return _chime_response(s, s.cycles[-1].get("suggestion") if s.cycles else None, len(todo),
+                               phase="early" if phase == "early" else None)
 
 
 def mark_returned(session_id: Optional[str]) -> None:

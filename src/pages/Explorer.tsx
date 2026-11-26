@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { evaluate, generateAnswer, getGraph, TECHNIQUES, type Chunk, type GraphEdge, type GraphNode, type Metric } from "@/lib/api";
+import { evaluate, generateAnswer, getGraph, TECHNIQUES, type AnswerMeta, type Chunk, type GraphEdge, type GraphNode, type Metric } from "@/lib/api";
 import { useExplorer } from "@/lib/explorer-context";
 import { useHotkeys } from "@/lib/hotkeys";
 import { deriveSignals } from "@/lib/signals";
@@ -28,6 +28,7 @@ export default function Explorer() {
   const inputRef = useRef<HTMLInputElement>(null);
   const answerReq = useRef(0);                       // guards against superseded responses
   const answerCache = useRef(new Map<string, string>()); // generated answer per run
+  const answerMeta = useRef(new Map<string, AnswerMeta>()); // how each run's answer was made (graph lookup or text)
 
   // the backend run the answer + metrics belong to: every retrieval is a new run
   const answerKey = result?.runId ?? "";
@@ -44,6 +45,7 @@ export default function Explorer() {
     generateAnswer(answerKey).then((r) => {
       const text = r.answer || (r.note ? `_${r.note}_` : "_No answer was generated._");
       answerCache.current.set(answerKey, text);       // cache even if the view moved on
+      answerMeta.current.set(answerKey, r.meta);
       if (id !== answerReq.current) return;            // a newer request superseded this one
       setAnswer({ key: answerKey, text });
       setAnswerLoading(false);
@@ -145,6 +147,7 @@ export default function Explorer() {
             activeChunkId={activeChunk?.id ?? null}
             onChunk={setActiveChunk}
             answer={answer?.key === answerKey ? answer.text : ""}
+            answerMeta={answer?.key === answerKey ? answerMeta.current.get(answerKey) : undefined}
             answerLoading={answerLoading}
             evalMetrics={evalState?.key === answerKey ? evalState.metrics : null}
             evalLoading={evalLoading}

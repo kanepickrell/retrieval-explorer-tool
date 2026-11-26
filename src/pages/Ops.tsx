@@ -251,6 +251,7 @@ const STATUS: Record<OpsJob["status"], { label: string; cls: string }> = {
   running: { label: "running", cls: "border-vector/60 text-vector" },
   suggested: { label: "suggested", cls: "border-good/60 text-good" },
   quiet: { label: "quiet", cls: "border-line text-muted" },
+  followups: { label: "follow-ups", cls: "border-line text-muted" },
   error: { label: "error", cls: "border-bad/60 text-bad" },
   lost: { label: "lost", cls: "border-warn/60 text-warn" },
 };

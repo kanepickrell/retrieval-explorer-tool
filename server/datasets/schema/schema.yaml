@@ -1,0 +1,571 @@
+# ProtoGraph semantic model: the shared definition of what the metadata graph holds.
+#
+#   classes     node types, grouped under abstract parent classes
+#   relations   edge types: direction (from -> to), what produces them, and their status
+#   taxonomies  controlled vocabularies an LLM assigns to records (tag_docs.py reads these)
+#   glossary    agreed meanings of words that are ambiguous in this domain
+#   rules       derived edges a query (or a later build step) can compute from the graph
+#
+# status: implemented = build_metadata_graph.py produces it today
+#         proposed    = agreed direction, not built yet (shown dashed on the schema map)
+#
+# Edited from Prospector > Semantic model, or by hand. Saving from the UI rewrites this file
+# (comments other than this header are not kept) and keeps the previous version under
+# history/. Topic and document-type changes take effect after tag_docs.py and
+# build_metadata_graph.py are re-run on a dataset; Prospector flags datasets tagged with an
+# older vocabulary.
+
+version: 21
+name: Agent Hub semantic model
+description: Records from Open WebUI and the Agent Hub (chats, files, people, teams, agents and their parts), linked
+  by who did what and what it is about. Retrieval searches one card per record; the edges scope and explain the
+  hits.
+classes:
+  Actor:
+    abstract: true
+    description: Someone (or a group) who does work in the system.
+  User:
+    parent: Actor
+    status: implemented
+    description: A person using Open WebUI. Always a pseudonym (user-NN); real names never enter the graph.
+    key: user-NN pseudonym
+    source: openwebui/user
+    properties:
+      team:
+        type: string
+        description: 'the team the user belongs to (absent: on no team)'
+        source: teams.json
+      chats:
+        type: integer
+        description: indexed chats the user opened
+        source: count of opened edges
+      files:
+        type: integer
+        description: files the user uploaded
+        source: count of uploaded edges
+  Team:
+    parent: Actor
+    status: implemented
+    description: A working group users belong to.
+    key: team name
+    source: teams.json
+    properties:
+      name:
+        type: string
+        description: team name
+        source: teams.json
+      members:
+        type: integer
+        description: number of users on the team
+        source: count of member_of edges
+  Activity:
+    abstract: true
+    description: Something that happened, at a time, involving actors.
+  Chat:
+    parent: Activity
+    status: implemented
+    description: One Open WebUI conversation.
+    key: chat id
+    source: openwebui/chat
+    properties:
+      title:
+        type: string
+        description: chat title
+        source: chat.title
+      started:
+        type: date
+        description: date the chat was opened
+        source: chat.created_at
+      last_active:
+        type: date
+        description: date of the last message
+        source: chat.updated_at
+      user_turns:
+        type: integer
+        description: number of user messages
+        source: chat_message
+  Artifact:
+    abstract: true
+    description: Something a person can read or reuse (a document, script, schedule...).
+  File:
+    parent: Artifact
+    status: implemented
+    description: A file uploaded into a chat or knowledge base (the original bytes).
+    key: 'file id (proposed: content hash, so the same upload twice is one node)'
+    source: openwebui/file
+    properties:
+      filename:
+        type: string
+        description: uploaded file name
+        source: file.filename
+      format:
+        type: enum
+        description: file format from the extension (else the MIME type)
+        source: file name / content type
+        values:
+        - pdf
+        - markdown
+        - python
+        - yaml
+        - csv
+        - json
+        - text
+        - html
+        - word
+        - excel
+        - powerpoint
+        - powershell
+        - shell
+        - image
+        - unknown
+      content_type:
+        type: string
+        description: MIME type the upload reported
+        source: file.meta.content_type
+      size_bytes:
+        type: integer
+        description: size of the uploaded file
+        source: file.meta.size
+      uploaded_on:
+        type: date
+        description: upload date
+        source: file.created_at
+      doc_type:
+        type: enum
+        description: what kind of document it is (the LLM classifier)
+        source: tags.json _doc_types
+        taxonomy: doc_types
+  GeneratedArtifact:
+    parent: Artifact
+    status: proposed
+    description: A document or script written inside a chat or by an agent run (no export table yet).
+  Capability:
+    abstract: true
+    description: Something that does work for a user (an agent and its parts, or a model).
+  Agent:
+    parent: Capability
+    status: implemented
+    description: An Agent Hub AI assistant (a model plus prompt, skills and tools).
+    key: agent slug
+    source: hub/agent_version
+    properties:
+      name:
+        type: string
+        description: display name of the agent
+        source: manifest name
+      slug:
+        type: string
+        description: stable id used in URLs and manifests
+        source: manifest slug
+      created_on:
+        type: date
+        description: date it was first published
+        source: hub agent created_at
+      category:
+        type: string
+        description: Hub category, when the author set one
+        source: hub agent category
+      version:
+        type: integer
+        description: latest published version number
+        source: hub agent_version
+  Skill:
+    parent: Capability
+    status: implemented
+    description: A skill an agent's manifest declares.
+    source: hub manifest
+    properties:
+      name:
+        type: string
+        description: skill name
+        source: manifest skills
+  Step:
+    parent: Capability
+    status: implemented
+    description: A reusable Agent Hub workflow step.
+    key: step slug
+    source: hub/step_version
+    properties:
+      name:
+        type: string
+        description: display name of the step
+        source: manifest name
+      slug:
+        type: string
+        description: stable id used in URLs and manifests
+        source: manifest slug
+      created_on:
+        type: date
+        description: date it was first published
+        source: hub step created_at
+      category:
+        type: string
+        description: Hub category, when the author set one
+        source: hub step category
+      version:
+        type: integer
+        description: latest published version number
+        source: hub step_version
+  Tool:
+    parent: Capability
+    status: implemented
+    description: An Agent Hub tool an agent can call.
+    key: tool slug
+    source: hub/tool_version
+    properties:
+      name:
+        type: string
+        description: display name of the tool
+        source: manifest name
+      slug:
+        type: string
+        description: stable id used in URLs and manifests
+        source: manifest slug
+      created_on:
+        type: date
+        description: date it was first published
+        source: hub tool created_at
+      category:
+        type: string
+        description: Hub category, when the author set one
+        source: hub tool category
+      version:
+        type: integer
+        description: latest published version number
+        source: hub tool_version
+  Model:
+    parent: Capability
+    status: implemented
+    description: A chat model (Ollama model id) that answered in a chat.
+    key: model id
+    source: assistant messages' model_id
+    properties:
+      model_id:
+        type: string
+        description: Ollama model id
+        source: assistant messages' model_id
+  Concept:
+    abstract: true
+    description: A subject that records are about.
+  Topic:
+    parent: Concept
+    status: implemented
+    description: A term from the topics taxonomy (assigned by tag_docs.py), or a Hub item's own tag.
+    key: topic name
+    source: tags.json; hub manifest tags
+    properties:
+      name:
+        type: string
+        description: the term or tag
+        source: tags.json; hub manifest tags
+  Technique:
+    parent: Concept
+    status: implemented
+    description: A MITRE ATT&CK technique (T1059.001...) named in a chat's or file's text, checked against the ATT&CK
+      data attack-mcp serves; ids that are not in ATT&CK are dropped.
+    key: technique id
+    source: ATT&CK ids found in the text (build_metadata_graph.py mentions)
+    properties:
+      technique_id:
+        type: string
+        description: ATT&CK id, e.g. T1059.001
+        source: the text
+      name:
+        type: string
+        description: ATT&CK technique name
+        source: ATT&CK bundle
+      retired:
+        type: boolean
+        description: the id is revoked or deprecated in this ATT&CK version
+        source: ATT&CK bundle
+      attack_version:
+        type: string
+        description: ATT&CK version checked against
+        source: ATT&CK bundle
+  Catalog:
+    status: implemented
+    description: A generated listing of every agent, tool, step, uploaded file or team (answers "what agents exist?",
+      "how many PDFs?", "who is on which team?").
+    source: generated
+    properties:
+      kind:
+        type: string
+        description: what it lists (agents, tools, steps, files, teams)
+        source: generated
+      count:
+        type: integer
+        description: how many items it lists
+        source: generated
+relations:
+  member_of:
+    from:
+    - User
+    to:
+    - Team
+    status: implemented
+    source: teams.json
+  opened:
+    from:
+    - User
+    to:
+    - Chat
+    status: implemented
+    source: chat.user_id
+  contains:
+    from:
+    - Chat
+    to:
+    - File
+    status: implemented
+    source: chat_file
+  uploaded:
+    from:
+    - User
+    to:
+    - File
+    status: implemented
+    source: file.user_id
+  created:
+    from:
+    - User
+    to:
+    - Agent
+    - Step
+    - Tool
+    status: implemented
+    source: owner_id
+  installed:
+    from:
+    - User
+    to:
+    - Agent
+    - Step
+    - Tool
+    status: implemented
+    source: hub_install; agents used in a chat
+  used:
+    from:
+    - Chat
+    to:
+    - Agent
+    - Model
+    status: implemented
+    source: assistant messages' model_id
+  has_skill:
+    from:
+    - Agent
+    to:
+    - Skill
+    status: implemented
+    source: manifest skills
+  uses:
+    from:
+    - Agent
+    to:
+    - Tool
+    - Step
+    status: implemented
+    source: manifest tools
+  forked_from:
+    from:
+    - Agent
+    - Step
+    - Tool
+    to:
+    - Agent
+    - Step
+    - Tool
+    status: implemented
+    source: forked_from_slug
+  about:
+    from:
+    - Chat
+    - File
+    - Agent
+    - Step
+    - Tool
+    to:
+    - Topic
+    status: implemented
+    source: tags.json (LLM); hub tags
+  lists:
+    from:
+    - Catalog
+    to:
+    - Agent
+    - Tool
+    - Step
+    - File
+    - Team
+    status: implemented
+    source: generated
+  produced:
+    from:
+    - Chat
+    - Agent
+    to:
+    - GeneratedArtifact
+    status: proposed
+    source: none in the export yet
+  mentions:
+    from:
+    - Chat
+    - File
+    to:
+    - Technique
+    - File
+    status: implemented
+    source: 'literal matches in the full text: ATT&CK ids in chats and files (checked against ATT&CK); uploaded
+      file names in chats (not when the chat already attaches the file)'
+taxonomies:
+  topics:
+    description: What a chat or file is substantially about. The LLM picks 1-4 leaf terms.
+    class: Topic
+    applies_to:
+    - Chat
+    - File
+    assigned_by: llm
+    max_per_record: 4
+    terms:
+      range-operations:
+        description: Running the exercise range itself.
+        children:
+          range-infrastructure:
+            description: Proxmox, hypervisors, snapshots, revert, storage, VM/enclave performance
+          active-directory:
+            description: domains, trust relationships, Kerberos, time sync, machine accounts, GPO
+          automation:
+            description: Ansible, Terraform, Packer, CI/CD pipelines, scripted deployment, WinRM tooling
+          troubleshooting:
+            description: something was broken and the conversation works out why or how to fix it
+      red-and-blue:
+        description: Attacking and defending inside the exercise.
+        children:
+          detection:
+            description: Sysmon, Windows event IDs, SIEM, EDR, blue-team visibility and alerting
+          adversary-emulation:
+            description: ATT&CK techniques, lateral movement, phishing, C2, red-team tradecraft
+      exercise-planning:
+        description: Designing and governing an exercise.
+        children:
+          scenario-design:
+            description: exercise scenarios, MSELs, injects, storylines, exercise timelines
+          exercise-rules:
+            description: rules of engagement, scope, stop words, maintenance windows, exercise policy
+          content-seeding:
+            description: planting emails, files and artifacts into enclaves for an exercise
+      off-topic:
+        description: greetings, small talk, requests unrelated to the team's work
+    rejected:
+    - data
+    - dates
+    - docs
+    - documents
+    - explaining
+    - export
+    - files
+    - learning
+    - text
+    - utility
+    - work
+  doc_types:
+    description: What kind of document an artifact is. The LLM picks exactly one.
+    applies_to:
+    - File
+    assigned_by: llm
+    max_per_record: 1
+    terms:
+      runbook:
+        description: step-by-step operating or recovery procedure
+      rules-of-engagement:
+        description: 'what is allowed or forbidden during an exercise: scope, limits, stop words'
+      exercise-schedule:
+        description: MSEL, timeline or calendar of exercise events and injects
+      script:
+        description: source code or a script meant to be run
+      reference:
+        description: background reference material, a guide or a specification
+      notes:
+        description: informal notes, a summary or a write-up of a discussion
+      other:
+        description: none of the above
+  capabilities:
+    description: What does this tool do for people?
+    class: Topic
+    applies_to:
+    - Agent
+    assigned_by: author
+    terms:
+      coding:
+        description: ''
+        aliases:
+        - review
+        - debugging
+        - testing
+      writing:
+        description: ''
+      scheduling:
+        description: ''
+      data:
+        description: ''
+      editing:
+        description: ''
+      notes:
+        description: ''
+      research:
+        description: ''
+      sql:
+        description: ''
+glossary:
+  agent:
+    definition: In the Agent Hub, an AI assistant (a model with a prompt, skills and tools).
+    not: A C2 agent (an implant on a host, as in Caldera or a beacon), when the user talks about C2, implants or
+      hosts.
+    synonyms:
+    - assistant
+    - hub agent
+    used_by:
+    - ping update prompt
+  runbook:
+    definition: A step-by-step operating or recovery procedure.
+    synonyms:
+    - playbook
+    - procedure
+    - sop
+  roe:
+    definition: Rules of engagement for an exercise (scope, limits, stop words).
+    synonyms:
+    - rules of engagement
+  msel:
+    definition: Master Scenario Events List, the scheduled injects of an exercise.
+    synonyms:
+    - master scenario events list
+    - inject schedule
+  inject:
+    definition: A scripted event introduced into an exercise to prompt a response.
+  enclave:
+    definition: An isolated network segment of the range that a team works inside.
+rules:
+  knows_about:
+    description: A user has worked on a topic (opened a chat or uploaded a file about it). Answers "who should I
+      ask?".
+    from: User
+    to: Topic
+    via:
+    - - opened
+      - about
+    - - uploaded
+      - about
+    status: proposed
+  works_on:
+    description: A team works on a topic (any member knows about it).
+    from: Team
+    to: Topic
+    via:
+    - - member_of
+      - opened
+      - about
+    - - member_of
+      - uploaded
+      - about
+    status: proposed

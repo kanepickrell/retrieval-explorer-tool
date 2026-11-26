@@ -121,8 +121,12 @@ def _stages(resp: dict) -> list:
     cyc = resp.get("cycle")
     if cyc:   # ping: the cycle's eight stages, in order
         out = []
+        late = resp.get("phase") == "late"   # a split turn's second half: stages 1-6 ran on the early job
         for name in cyc.get("order", []):
             st = (cyc.get("stages") or {}).get(name) or {}
+            if late and name not in ("probe", "learn"):
+                out.append({"name": name, "status": "pending", "ms": 0, "title": "ran on the earlier job for this message"})
+                continue
             out.append({"name": name, "status": st.get("status", "pending"), "ms": st.get("ms", 0),
                         "title": st.get("title", "")})
         return out
@@ -147,7 +151,11 @@ def finish(job_id: Optional[int], resp: Optional[dict], ms: float, error: Option
         cyc = resp.get("cycle") or {}
         sugg = resp.get("suggestions") or []
         status = "error" if error else ("suggested" if sugg and not resp.get("stay_quiet") else "quiet")
-        reason = error or (None if status == "suggested" else (cyc.get("gate_failed") or resp.get("reason")))
+        if status == "quiet" and resp.get("phase") == "late":
+            status = "followups"   # a split turn's second half: follow-ups only, not a quiet turn
+        reason = error or (None if status == "suggested" else
+                           "follow-ups for the reply" if status == "followups" else
+                           (cyc.get("gate_failed") or resp.get("reason")))
         detail = {"stages": _stages(resp), "criteria": cyc.get("criteria") or [], "gate_title": cyc.get("gate_title"),
                   "turns_run": cyc.get("turns_run"), "hypotheses": cyc.get("hypotheses") or [],
                   "suggestions": [{"doc": s.get("doc"), "title": s.get("title"), "why": s.get("why"), "kind": s.get("kind")}

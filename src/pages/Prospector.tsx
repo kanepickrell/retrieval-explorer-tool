@@ -6,6 +6,7 @@ import { useExplorer } from "@/lib/explorer-context";
 import ProspectorTable from "@/components/ProspectorTable";
 import FlowStepper from "@/components/FlowStepper";
 import DocTree from "@/components/DocTree";
+import SemanticModel from "@/components/semantic/SemanticModel";
 
 
 export default function Prospector() {
@@ -34,6 +35,8 @@ export default function Prospector() {
         <ProspectorTable datasets={datasets} activeId={datasetId}
           onSelect={(id) => { if (datasets.find((d) => d.id === id)?.status === "ready") setDatasetId(id); }} />
       </section>
+
+      {datasetId && <SemanticModel datasetId={datasetId} />}
 
       <section className="card">
         <div className="mb-3 flex items-baseline justify-between">

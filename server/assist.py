@@ -175,6 +175,9 @@ class AssistRequest(BaseModel):
     user_id: Optional[str] = None
     user_name: Optional[str] = None
     chat_model: Optional[str] = None      # the model the user picked in Open WebUI (Ops shows it)
+    # engine="ping" split turns: "early" = sent with the user's message, before the reply
+    # (stages 1-6 run while the chat model writes); "late" = the reply finished (follow-ups).
+    phase: Optional[str] = Field(None, pattern="^(early|late)$")
 
 
 def _text_of(turns: List[Turn]) -> str:

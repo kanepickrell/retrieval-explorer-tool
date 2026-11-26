@@ -7,7 +7,8 @@ per corpus item, ready for LightRAG ingestion.
   agents     -> agent-<slug>.md       (latest manifest: description, system prompt, steps, tools)
   steps      -> step-<slug>.md
   hub tools  -> tool-<slug>.md
-  catalogs   -> catalog-agents.md, catalog-tools.md, catalog-steps.md
+  catalogs   -> catalog-agents.md, catalog-tools.md, catalog-steps.md, catalog-files.md,
+                catalog-teams.md
                 (one doc listing every item, so "list all the agents" can be
                 answered from a single chunk instead of 15 separate docs)
   people     -> person-<user-NN>.md: each pseudonymous user's indexed chats
@@ -81,6 +82,21 @@ def day(ts) -> str:
         return datetime.fromtimestamp(int(float(ts)), timezone.utc).strftime("%Y-%m-%d")
     except Exception:
         return "unknown date"
+
+
+FORMATS = {"pdf": "pdf", "md": "markdown", "markdown": "markdown", "py": "python", "yml": "yaml", "yaml": "yaml",
+           "csv": "csv", "json": "json", "txt": "text", "log": "text", "html": "html", "htm": "html",
+           "docx": "word", "doc": "word", "xlsx": "excel", "xls": "excel", "pptx": "powerpoint",
+           "ps1": "powershell", "sh": "shell", "png": "image", "jpg": "image", "jpeg": "image"}
+MIME_FORMATS = {"application/pdf": "pdf", "text/markdown": "markdown", "text/x-python": "python",
+                "text/csv": "csv", "application/json": "json", "text/plain": "text", "text/html": "html"}
+
+
+def file_format(filename: str, content_type: str = "") -> str:
+    """A file's format from its extension, else its MIME type ('pdf', 'python', 'yaml', ...).
+    The extension wins: uploads often arrive as application/octet-stream."""
+    ext = (filename or "").rsplit(".", 1)[-1].lower() if "." in (filename or "") else ""
+    return FORMATS.get(ext) or MIME_FORMATS.get((content_type or "").split(";")[0].strip()) or (ext or "unknown")
 
 
 def slug(s: str) -> str:
@@ -208,6 +224,52 @@ def main(export_dir: str, out_dir: str) -> None:
                 bits.append(f"Forked from {x['forked_from_slug']}.")
             lines.append(f"- **{x.get('name')}** (`{x.get('slug')}`): " + " ".join(b for b in bits if b))
         (out / f"catalog-{plural}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        written["catalog"] += 1
+
+    # ── catalogs of files and teams: complete lists, so "how many PDFs?" or "who is on which
+    # team?" is answered from one doc instead of being pieced together from a few hits ──
+    files = [f for f in load(ex / "openwebui/file.json") if (out / f"file-{f['id']}.md").exists()]
+    if files:
+        chat_titles = {c["id"]: c.get("title") or "Chat" for c in load(ex / "openwebui/chat.json")}
+        in_chats = defaultdict(list)
+        for cf in load(ex / "openwebui/chat_file.json"):
+            if cf.get("chat_id") in chat_titles:
+                in_chats[cf["file_id"]].append(chat_titles[cf["chat_id"]])
+        rows = []
+        for f in sorted(files, key=lambda f: (f.get("filename") or "").lower()):
+            meta = loose(f.get("meta")) or {}
+            name = f.get("filename") or f["id"]
+            rows.append((file_format(name, meta.get("content_type")), name, f, meta))
+        by_format = defaultdict(int)
+        for fmt, *_ in rows:
+            by_format[fmt] += 1
+        lines = ["# Uploaded files catalog: all files", "",
+                 f"There are {len(rows)} uploaded files: "
+                 + ", ".join(f"{n} {fmt}" for fmt, n in sorted(by_format.items(), key=lambda x: (-x[1], x[0]))) + ".",
+                 "The complete list (only these are files; names mentioned inside a file's text are not separate files):", ""]
+        for fmt, name, f, meta in rows:
+            bits = [f"format {fmt}", f"{meta.get('size') or '?'} bytes",
+                    f"uploaded {day(f.get('created_at'))} by {f.get('user_id') or 'unknown'}"]
+            if in_chats.get(f["id"]):
+                bits.append("attached in: " + "; ".join(in_chats[f["id"]]))
+            lines.append(f"- **{name}**: " + ", ".join(bits) + f" [file-{f['id']}.md]")
+        (out / "catalog-files.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        written["catalog"] += 1
+    teams = {k: v for k, v in (load(ex / "teams.json") if (ex / "teams.json").exists() else {}).items()
+             if re.fullmatch(r"user-\d+", k)}
+    if teams:
+        members = defaultdict(list)
+        for u, t in teams.items():
+            members[t].append(u)
+        lines = ["# Teams catalog: all teams", "",
+                 f"There are {len(members)} teams: {', '.join(sorted(members))}. No other teams exist.",
+                 "The complete list of teams and their members:", ""]
+        for t in sorted(members):
+            lines.append(f"- **{t}**: members {', '.join(sorted(members[t]))}")
+        unassigned = sorted(set(by_person) - set(teams))
+        if unassigned:
+            lines.append(f"- Not on any team: {', '.join(unassigned)}")
+        (out / "catalog-teams.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
         written["catalog"] += 1
 
     # ── people: each pseudonymous user's indexed chats ──

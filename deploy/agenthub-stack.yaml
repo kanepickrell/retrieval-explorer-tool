@@ -57,7 +57,7 @@ services:
         USE_SLIM: "true"
     environment:
       RETRIEVAL_EXPLORER_URL: http://retrieval-explorer:8000
-      CHIME_DATASET: ${CHIME_DATASET:-agenthub-export-2026-11-10-latency}
+      CHIME_DATASET: ${CHIME_DATASET:-agenthub-export-2026-11-25-personas}
       CHIME_TECHNIQUE: ${CHIME_TECHNIQUE:-bm25_vector}
       # "ping" = the full hypothesis-driven Ping cycle (profile, L1/L2, gate), keyed per chat.
       # "assist" = the simpler one-shot rewrite -> retrieve -> score -> judge path.

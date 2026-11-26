@@ -1,5 +1,5 @@
 """
-Build a LightRAG index (graph + chunk vdb) from a folder of markdown docs,
+LEGACY (ingest now uses build_passages.py, no LLM): build a LightRAG index (graph + chunk vdb) from a folder of markdown docs,
 with the SAME settings the backend queries with (retrieval/ollama_client.py):
 nomic-embed-text (768d, search_document:/search_query: prefixes), gemma3:12b,
 500/50-token chunks. Point the backend at the result with

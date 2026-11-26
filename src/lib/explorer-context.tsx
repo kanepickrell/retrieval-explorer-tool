@@ -38,7 +38,8 @@ const ExplorerCtx = createContext<Ctx | null>(null);
 
 export function ExplorerProvider({ children }: { children: ReactNode }) {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [datasetId, setDatasetId] = useState("");
+  // ?dataset=<id> opens a dataset directly (shareable links, screenshots)
+  const [datasetId, setDatasetId] = useState(() => new URLSearchParams(window.location.search).get("dataset") ?? "");
   const [error, setError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<Highlight>(null);
 
